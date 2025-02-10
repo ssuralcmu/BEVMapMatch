@@ -43,7 +43,6 @@ for i, file in enumerate(npy_files[:100]):
 
         # Get sample from token
         sample = nusc.get('sample', data['token'])
-
         # Get sample data for LIDAR_TOP
         sample_data = nusc.get('sample_data', sample['data']['LIDAR_TOP'])
 
