@@ -139,7 +139,7 @@ def main() -> None:
         # print("Latitude:", lat, "Longitude:", lon)
 
         # Define the map patch around the ego vehicle
-        patch_size = 200  # 200 meters in each direction (1km total)
+        patch_size = 1000  # 200 meters in each direction (1km total)
 
 
         # Render the map and get figure, axis
