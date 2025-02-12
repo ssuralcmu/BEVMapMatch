@@ -15,3 +15,8 @@
 */*.pyc
 
 /all_*/
+
+/scripts_2025/__pycache__/*
+/scripts_2025/evaluation_results/*
+
+/scripts_2025/*.pth

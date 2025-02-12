@@ -139,7 +139,7 @@ def main() -> None:
         # print("Latitude:", lat, "Longitude:", lon)
 
         # Define the map patch around the ego vehicle
-        patch_size = 500  # 200 meters in each direction (1km total)
+        patch_size = 500  # (1km total)
 
 
         # Render the map and get figure, axis
@@ -159,7 +159,7 @@ def main() -> None:
         name = "{}-{}".format(metas["timestamp"], metas["token"])
 
 
-        save_path = 'all_val_basemaps_1km/'+name+"_generated_map_image.png"  # Change this to your desired save location
+        save_path = 'all_'+args.split+'_basemaps/'+name+"_base_map_image.png"  # Change this to your desired save location
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close(fig)  # Close the figure to free memory
 
@@ -167,96 +167,96 @@ def main() -> None:
         
         #Save metas variable to file
         # print("Saving metas variable...")
-        # metas_save_path = 'all_val_metas/'+name+"_metas.npy"  # Change this to your desired save location
-        # np.save(metas_save_path, metas)
+        metas_save_path = 'all_'+args.split+'_metas/'+name+"_metas.npy"  # Change this to your desired save location
+        np.save(metas_save_path, metas)
 
 
-        # if args.mode == "pred":
-        #     with torch.inference_mode():
-        #         outputs = model(**data)
+        if args.mode == "pred":
+            with torch.inference_mode():
+                outputs = model(**data)
 
-        # # if args.mode == "gt" and "gt_bboxes_3d" in data:
-        # #     bboxes = data["gt_bboxes_3d"].data[0][0].tensor.numpy()
-        # #     labels = data["gt_labels_3d"].data[0][0].numpy()
+        # if args.mode == "gt" and "gt_bboxes_3d" in data:
+        #     bboxes = data["gt_bboxes_3d"].data[0][0].tensor.numpy()
+        #     labels = data["gt_labels_3d"].data[0][0].numpy()
 
-        # #     if args.bbox_classes is not None:
-        # #         indices = np.isin(labels, args.bbox_classes)
-        # #         bboxes = bboxes[indices]
-        # #         labels = labels[indices]
+        #     if args.bbox_classes is not None:
+        #         indices = np.isin(labels, args.bbox_classes)
+        #         bboxes = bboxes[indices]
+        #         labels = labels[indices]
 
-        # #     bboxes[..., 2] -= bboxes[..., 5] / 2
-        # #     # print("GT",bboxes)
-        # #     bboxes = LiDARInstance3DBoxes(bboxes, box_dim=9)
-        # # elif args.mode == "pred" and "boxes_3d" in outputs[0]:
-        # #     bboxes = outputs[0]["boxes_3d"].tensor.numpy()
-        # #     scores = outputs[0]["scores_3d"].numpy()
-        # #     labels = outputs[0]["labels_3d"].numpy()
+        #     bboxes[..., 2] -= bboxes[..., 5] / 2
+        #     # print("GT",bboxes)
+        #     bboxes = LiDARInstance3DBoxes(bboxes, box_dim=9)
+        # elif args.mode == "pred" and "boxes_3d" in outputs[0]:
+        #     bboxes = outputs[0]["boxes_3d"].tensor.numpy()
+        #     scores = outputs[0]["scores_3d"].numpy()
+        #     labels = outputs[0]["labels_3d"].numpy()
 
-        # #     if args.bbox_classes is not None:
-        # #         indices = np.isin(labels, args.bbox_classes)
-        # #         bboxes = bboxes[indices]
-        # #         scores = scores[indices]
-        # #         labels = labels[indices]
+        #     if args.bbox_classes is not None:
+        #         indices = np.isin(labels, args.bbox_classes)
+        #         bboxes = bboxes[indices]
+        #         scores = scores[indices]
+        #         labels = labels[indices]
 
-        # #     if args.bbox_score is not None:
-        # #         indices = scores >= args.bbox_score
-        # #         bboxes = bboxes[indices]
-        # #         scores = scores[indices]
-        # #         labels = labels[indices]
+        #     if args.bbox_score is not None:
+        #         indices = scores >= args.bbox_score
+        #         bboxes = bboxes[indices]
+        #         scores = scores[indices]
+        #         labels = labels[indices]
 
-        # #     bboxes[..., 2] -= bboxes[..., 5] / 2
-        # #     # print("PRED",bboxes)
-        # #     bboxes = LiDARInstance3DBoxes(bboxes, box_dim=9)
-        # # else:
-        # #     bboxes = None
-        # #     labels = None
-
-        # if args.mode == "gt" and "gt_masks_bev" in data:
-        #     masks = data["gt_masks_bev"].data[0].numpy()
-        #     masks = masks.astype(np.bool)
-        # elif args.mode == "pred" and "masks_bev" in outputs[0]:
-        #     masks = outputs[0]["masks_bev"].numpy()
-        #     masks = masks >= args.map_score
+        #     bboxes[..., 2] -= bboxes[..., 5] / 2
+        #     # print("PRED",bboxes)
+        #     bboxes = LiDARInstance3DBoxes(bboxes, box_dim=9)
         # else:
-        #     masks = None
+        #     bboxes = None
+        #     labels = None
 
-        # # if "img" in data:
-        # #     for k, image_path in enumerate(metas["filename"]):
-        # #         image = mmcv.imread(image_path)
-        # #         #print("Debuggging inside visuliase.py ******* ")
-        # #         #print(k)
-        # #         #print(image_path)
-        # #         #print(metas["lidar2image"][k])
+        if args.mode == "gt" and "gt_masks_bev" in data:
+            masks = data["gt_masks_bev"].data[0].numpy()
+            masks = masks.astype(np.bool)
+        elif args.mode == "pred" and "masks_bev" in outputs[0]:
+            masks = outputs[0]["masks_bev"].numpy()
+            masks = masks >= args.map_score
+        else:
+            masks = None
 
-        # #         visualize_camera(
-        # #             os.path.join(args.out_dir, f"camera-{k}", f"{name}.png"),
-        # #             image,
-        # #             bboxes=bboxes,
-        # #             labels=labels,
-        # #             transform=metas["lidar2image"][k],
-        # #             classes=cfg.object_classes,
-        # #         )
+        # if "img" in data:
+        #     for k, image_path in enumerate(metas["filename"]):
+        #         image = mmcv.imread(image_path)
+        #         #print("Debuggging inside visuliase.py ******* ")
+        #         #print(k)
+        #         #print(image_path)
+        #         #print(metas["lidar2image"][k])
 
-        # # if "points" in data:
-        # #     lidar = data["points"].data[0][0].numpy()
-        # #     visualize_lidar(
-        # #         os.path.join(args.out_dir, "lidar", f"{name}.png"),
-        # #         lidar,
-        # #         bboxes=bboxes,
-        # #         labels=labels,
-        # #         xlim=[cfg.point_cloud_range[d] for d in [0, 3]],
-        # #         ylim=[cfg.point_cloud_range[d] for d in [1, 4]],
-        # #         classes=cfg.object_classes,
-        # #     )
+        #         visualize_camera(
+        #             os.path.join(args.out_dir, f"camera-{k}", f"{name}.png"),
+        #             image,
+        #             bboxes=bboxes,
+        #             labels=labels,
+        #             transform=metas["lidar2image"][k],
+        #             classes=cfg.object_classes,
+        #         )
 
-        # if masks is not None:
-        #     # print("Saving generated map")
-        #     # print(os.path.join(args.out_dir, "map", f"{name}.png"))
-        #     visualize_map(
-        #         os.path.join(args.out_dir, "map", f"{name}_generated_map_image.png"),
-        #         masks,
-        #         classes=cfg.map_classes,
+        # if "points" in data:
+        #     lidar = data["points"].data[0][0].numpy()
+        #     visualize_lidar(
+        #         os.path.join(args.out_dir, "lidar", f"{name}.png"),
+        #         lidar,
+        #         bboxes=bboxes,
+        #         labels=labels,
+        #         xlim=[cfg.point_cloud_range[d] for d in [0, 3]],
+        #         ylim=[cfg.point_cloud_range[d] for d in [1, 4]],
+        #         classes=cfg.object_classes,
         #     )
+
+        if masks is not None:
+            # print("Saving generated map")
+            # print(os.path.join(args.out_dir, "map", f"{name}.png"))
+            visualize_map(
+                os.path.join(args.out_dir, "map", f"{name}_generated_map_image.png"),
+                masks,
+                classes=cfg.map_classes,
+            )
 
 
 if __name__ == "__main__":

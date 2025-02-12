@@ -8,7 +8,8 @@ import torch
 from mmcv import Config
 from mmcv.parallel import MMDistributedDataParallel
 from mmcv.runner import load_checkpoint
-from torchpack import distributed as dist
+# from torchpack import distributed as dist
+import torch.distributed as dist
 from torchpack.utils.config import configs
 #from torchpack.utils.tqdm import tqdm
 from tqdm import tqdm
@@ -37,7 +38,14 @@ def recursive_eval(obj, globals=None):
 
 
 def main() -> None:
-    dist.init()
+    import os
+
+    os.environ['RANK'] = '0'  # Set this to the rank of the current process
+    os.environ['WORLD_SIZE'] = '1'  # Set this to the total number of processes
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '29500'  # Choose any free port
+
+    dist.init_process_group(backend='gloo')  # or 'gloo' for CPU-only
 
     parser = argparse.ArgumentParser()
     parser.add_argument("config", metavar="FILE")
@@ -58,7 +66,8 @@ def main() -> None:
     np.set_printoptions(suppress = True)
 
     torch.backends.cudnn.benchmark = cfg.cudnn_benchmark
-    torch.cuda.set_device(dist.local_rank())
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
 
     # build the dataloader
     dataset = build_dataset(cfg.data[args.split])
@@ -90,9 +99,6 @@ def main() -> None:
 
 
     for data in tqdm(dataflow):
-
-        # print("Data keys:",data.keys())
-        # print("Data metas:",data["metas"].data[0][0].keys())
         metas = data["metas"].data[0][0]
 
         token = metas['token']
@@ -107,39 +113,19 @@ def main() -> None:
         # Retrieve the map name
         map_name = log['location']
 
-        # print("Map Name:", map_name)
-
-        # # metas
-        # print("Debuggging inside visuliase.py ******* ")
-
         # # Load the map (select the correct map based on your dataset)
         # map_name = "boston-seaport"  # Change based on location (check sample['scene_token'])
         nusc_map = NuScenesMap(dataroot='/data1/data/nuscenes/', map_name=map_name)
-
         # Get sample from token
         sample = nusc.get('sample', metas['token'])
-
         # Get sample data for LIDAR_TOP
         sample_data = nusc.get('sample_data', sample['data']['LIDAR_TOP'])
 
         # Get ego pose
         ego_pose = nusc.get('ego_pose', sample_data['ego_pose_token'])
-
-        # print("Ego pose:", ego_pose)
-
         # Extract global coordinates
         global_xyz = ego_pose['translation']  # [x, y, z]
-
-        #Obtained coordinates are nearly correct.
-        # print("Global coordinates:", global_xyz)
-        # wgs84 = pyproj.Proj(proj="latlong", datum="WGS84")
-        # utm = pyproj.Proj(proj="utm", zone=48, datum="WGS84")  # Adjust UTM zone if needed
-        # lon, lat = pyproj.transform(utm, wgs84, global_xyz[0], global_xyz[1])
-
-        # print("Latitude:", lat, "Longitude:", lon)
-
-        # Define the map patch around the ego vehicle
-        patch_size = 1000  # 200 meters in each direction (1km total)
+        patch_size = 500  # (1km total)
 
 
         # Render the map and get figure, axis
@@ -152,64 +138,15 @@ def main() -> None:
             alpha=0.5
         )
 
-        # print("Saving map figure...")
-
-        # Save the figure
-
         name = "{}-{}".format(metas["timestamp"], metas["token"])
 
 
-        save_path = 'all_'+args.split+'_basemaps/'+name+"_based_map_image.png"  # Change this to your desired save location
+        save_path = 'all_'+args.split+'_basemaps/'+name+"_base_map_image.png"  # Change this to your desired save location
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close(fig)  # Close the figure to free memory
-
-        # print(f"Map image saved at: {save_path}")
-        
-        #Save metas variable to file
-        # print("Saving metas variable...")
         metas_save_path = 'all_'+args.split+'_metas/'+name+"_metas.npy"  # Change this to your desired save location
         np.save(metas_save_path, metas)
 
-
-        if args.mode == "pred":
-            with torch.inference_mode():
-                outputs = model(**data)
-
-        # if args.mode == "gt" and "gt_bboxes_3d" in data:
-        #     bboxes = data["gt_bboxes_3d"].data[0][0].tensor.numpy()
-        #     labels = data["gt_labels_3d"].data[0][0].numpy()
-
-        #     if args.bbox_classes is not None:
-        #         indices = np.isin(labels, args.bbox_classes)
-        #         bboxes = bboxes[indices]
-        #         labels = labels[indices]
-
-        #     bboxes[..., 2] -= bboxes[..., 5] / 2
-        #     # print("GT",bboxes)
-        #     bboxes = LiDARInstance3DBoxes(bboxes, box_dim=9)
-        # elif args.mode == "pred" and "boxes_3d" in outputs[0]:
-        #     bboxes = outputs[0]["boxes_3d"].tensor.numpy()
-        #     scores = outputs[0]["scores_3d"].numpy()
-        #     labels = outputs[0]["labels_3d"].numpy()
-
-        #     if args.bbox_classes is not None:
-        #         indices = np.isin(labels, args.bbox_classes)
-        #         bboxes = bboxes[indices]
-        #         scores = scores[indices]
-        #         labels = labels[indices]
-
-        #     if args.bbox_score is not None:
-        #         indices = scores >= args.bbox_score
-        #         bboxes = bboxes[indices]
-        #         scores = scores[indices]
-        #         labels = labels[indices]
-
-        #     bboxes[..., 2] -= bboxes[..., 5] / 2
-        #     # print("PRED",bboxes)
-        #     bboxes = LiDARInstance3DBoxes(bboxes, box_dim=9)
-        # else:
-        #     bboxes = None
-        #     labels = None
 
         if args.mode == "gt" and "gt_masks_bev" in data:
             masks = data["gt_masks_bev"].data[0].numpy()
@@ -220,38 +157,7 @@ def main() -> None:
         else:
             masks = None
 
-        # if "img" in data:
-        #     for k, image_path in enumerate(metas["filename"]):
-        #         image = mmcv.imread(image_path)
-        #         #print("Debuggging inside visuliase.py ******* ")
-        #         #print(k)
-        #         #print(image_path)
-        #         #print(metas["lidar2image"][k])
-
-        #         visualize_camera(
-        #             os.path.join(args.out_dir, f"camera-{k}", f"{name}.png"),
-        #             image,
-        #             bboxes=bboxes,
-        #             labels=labels,
-        #             transform=metas["lidar2image"][k],
-        #             classes=cfg.object_classes,
-        #         )
-
-        # if "points" in data:
-        #     lidar = data["points"].data[0][0].numpy()
-        #     visualize_lidar(
-        #         os.path.join(args.out_dir, "lidar", f"{name}.png"),
-        #         lidar,
-        #         bboxes=bboxes,
-        #         labels=labels,
-        #         xlim=[cfg.point_cloud_range[d] for d in [0, 3]],
-        #         ylim=[cfg.point_cloud_range[d] for d in [1, 4]],
-        #         classes=cfg.object_classes,
-        #     )
-
         if masks is not None:
-            # print("Saving generated map")
-            # print(os.path.join(args.out_dir, "map", f"{name}.png"))
             visualize_map(
                 os.path.join(args.out_dir, "map", f"{name}_generated_map_image.png"),
                 masks,
