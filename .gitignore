@@ -20,3 +20,5 @@
 /scripts_2025/evaluation_results/*
 
 /scripts_2025/*.pth
+
+/scripts_2025/eval_results*

@@ -1,12 +1,8 @@
-Trainable parameters: 4852482
-Total parameters: 16028994
-Epoch [1/500], Train Loss: 24147.9492, Val Loss: 19553.3311
-Epoch [2/500], Train Loss: 26406.4297, Val Loss: 19553.3311
-Epoch [3/500], Train Loss: 13377.3262, Val Loss: 19553.3311
-Epoch [4/500], Train Loss: 9850.2471, Val Loss: 19553.3311
-Epoch [5/500], Train Loss: 4872.4238, Val Loss: 19553.3311
-Epoch [6/500], Train Loss: 5470.7856, Val Loss: 19553.3311
-Epoch [7/500], Train Loss: 5651.5088, Val Loss: 19553.3311
-Epoch [8/500], Train Loss: 2025.9473, Val Loss: 19553.3311
-Epoch [9/500], Train Loss: 1588.6715, Val Loss: 19553.3311
-Epoch [10/500], Train Loss: 2167.0227, Val Loss: 19553.3311
+Trainable parameters: 19008258
+Total parameters: 42516290
+Checkpoint path:  None
+FULL TRAINING
+Starting from scratch
+Checkpoint path:  None
+FULL TRAINING
+Starting from scratch

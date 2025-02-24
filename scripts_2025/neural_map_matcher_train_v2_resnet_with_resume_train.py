@@ -15,6 +15,8 @@ import torch.multiprocessing as mp
 import json
 import argparse
 
+
+
 class MapDataset(Dataset):
     def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
         self.basemap_folder = basemap_folder
@@ -69,16 +71,16 @@ class MapDataset(Dataset):
 
             return stitched_img, basemap_img, location
         except Exception as e:
-            return torch.zeros(3, 50, 50), torch.zeros(3, 500, 500), torch.zeros(2)
+            return torch.zeros(3, 500, 500), torch.zeros(3, 500, 500), torch.zeros(2)
 
 class LocationModel(nn.Module):
     def __init__(self):
         super(LocationModel, self).__init__()
-        resnet18 = models.resnet18(pretrained=True)
-        self.stitched_features = nn.Sequential(*list(resnet18.children())[:-2])
+        resnet = models.resnet50(pretrained=True)
+        self.stitched_features = nn.Sequential(*list(resnet.children())[:-2])
         
         # resnet34 = models.resnet34(pretrained=True)
-        self.basemap_features = nn.Sequential(*list(resnet18.children())[:-2])
+        self.basemap_features = nn.Sequential(*list(resnet.children())[:-2])
         
         for param in self.stitched_features.parameters():
             param.requires_grad = False
@@ -86,7 +88,7 @@ class LocationModel(nn.Module):
             param.requires_grad = False
         
         self.conv_combined = nn.Sequential(
-            nn.Conv2d(1024, 512, kernel_size=3, padding=1),
+            nn.Conv2d(4096, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),  # Add BatchNorm here
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((1, 1))
@@ -158,28 +160,63 @@ def count_trainable_parameters(model):
 def count_total_parameters(model):
     return sum(p.numel() for p in model.parameters())
 
-def train_model(rank, world_size, num_epochs, model, criterion, optimizer, train_dataset, val_dataset, batch_size, lr, version, fraction, checkpoint_path):
+def train_model(rank, world_size, num_epochs, model, criterion, optimizer, train_dataset, val_dataset, batch_size, lr, version, fraction, checkpoint_path, seed):
     setup(rank, world_size)
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     
     device = torch.device(f'cuda:{rank}')
     model = model.to(device)
     model = DDP(model, device_ids=[rank])
+    print("Checkpoint path: ", checkpoint_path)
+
+
+    if fraction >= 1.0:
+        print("FULL TRAINING")
+        #Use all the training data, no changes required for subset. Takes the full dataset from args
+        if checkpoint_path is None:
+            print("Starting from scratch")
+            start_epoch = 0
+            losses = {"train": [], "val": []}
+            subset_indices = torch.randperm(len(train_dataset))
+        elif checkpoint_path is not None and os.path.exists(checkpoint_path):
+            print("Resuming training")
+            checkpoint = torch.load(checkpoint_path)
+            model.module.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            losses = checkpoint['losses']
+            subset_indices = checkpoint['subset_indices']  # Load the indices
+        else:
+            raise ValueError("Checkpoint file not found")
+
+    else:
+        print("FRACTION TRAINING")
+        if checkpoint_path is None:
+            print("Starting from scratch")
+            num_samples = int(len(train_dataset) * fraction)
+            subset_indices = torch.randperm(len(train_dataset))[:num_samples]
+            train_dataset = torch.utils.data.Subset(train_dataset, subset_indices)
+            start_epoch = 0
+            losses = {"train": [], "val": []}
+
+        elif checkpoint_path is not None and os.path.exists(checkpoint_path):
+            print("Resuming training")
+            checkpoint = torch.load(checkpoint_path)
+            model.module.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            losses = checkpoint['losses']
+            subset_indices = checkpoint['subset_indices']  # Load the indices
+            train_dataset = torch.utils.data.Subset(train_dataset, subset_indices)
     
     train_dataloader = create_dataloader(rank, world_size, train_dataset, batch_size)
     val_dataloader = create_dataloader(rank, world_size, val_dataset, batch_size)
     
-    start_epoch = 0
-    losses = {"train": [], "val": []}
+    
 
-    fraction = int(fraction * 100)
-    unique_name=f"v{version}-lr{lr}-bs{batch_size}-f{fraction}"
-
-    if checkpoint_path and os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path)
-        model.module.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        losses = checkpoint['losses']
+    unique_name=f"v{version}-lr{lr}-bs{batch_size}-frac{fraction}-seed{seed}"
 
     best_val_loss = min(loss for epoch, loss in losses["val"]) if losses["val"] else float('inf')
     best_train_loss = min(loss for epoch, loss in losses["train"]) if losses["train"] else float('inf')
@@ -216,7 +253,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, train
             'epoch': epoch,
             'model_state_dict': model.module.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'losses': losses
+            'losses': losses,
+            'subset_indices': subset_indices  # Save the indices
             }
             torch.save(checkpoint, 'latest_map_location_model_train_'+unique_name+'.pth')
 
@@ -244,7 +282,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, train
                 'epoch': epoch,
                 'model_state_dict': model.module.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'losses': losses
+                'losses': losses,
+                'subset_indices': subset_indices  # Save the indices
                 }
                 torch.save(checkpoint, 'best_map_location_model_val_'+unique_name+'.pth')
 
@@ -275,6 +314,10 @@ def main():
     parser.add_argument('--version', type=int, default=2, help='Version of the model')
     args = parser.parse_args()
 
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+
     world_size = torch.cuda.device_count()
     base_folder = "/data1/"
 
@@ -290,10 +333,6 @@ def main():
 
     train_dataset = MapDataset(base_folder+'all_train_metas_v2', base_folder+'all_train_basemaps_v2', base_folder+'all_train_maps_gt_v2/map/', transform_base=transform_base, transform_gen=transform_gen)
     
-    if args.train_fraction < 1.0:
-        num_samples = int(len(train_dataset) * args.train_fraction)
-        indices = torch.randperm(len(train_dataset))[:num_samples]
-        train_dataset = torch.utils.data.Subset(train_dataset, indices)
 
     val_dataset = MapDataset(base_folder+'all_val_metas_v2', base_folder+'all_val_basemaps_v2', base_folder+'all_val_maps_gt_v2/map/', transform_base=transform_base, transform_gen=transform_gen)
 
@@ -307,7 +346,7 @@ def main():
 
     mp.spawn(
         train_model,
-        args=(world_size, num_epochs, model, criterion, optimizer, train_dataset, val_dataset, args.batch_size, args.lr, args.version, args.train_fraction, args.checkpoint),
+        args=(world_size, num_epochs, model, criterion, optimizer, train_dataset, val_dataset, args.batch_size, args.lr, args.version, args.train_fraction, args.checkpoint, args.seed),
         nprocs=world_size,
         join=True
     )
