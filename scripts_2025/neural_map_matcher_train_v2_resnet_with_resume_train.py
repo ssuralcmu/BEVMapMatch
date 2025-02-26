@@ -81,10 +81,10 @@ class LocationModel(nn.Module):
         self.stitched_features = nn.Sequential(*list(resnet.children())[:-2])
         self.basemap_features = nn.Sequential(*list(resnet.children())[:-2])
         
-        for param in self.stitched_features.parameters():
-            param.requires_grad = False
-        for param in self.basemap_features.parameters():
-            param.requires_grad = False
+        # for param in self.stitched_features.parameters():
+        #     param.requires_grad = False
+        # for param in self.basemap_features.parameters():
+        #     param.requires_grad = False
         
         self.conv_combined = nn.Sequential(
             nn.Conv2d(1024, 512, kernel_size=3, padding=1),
@@ -203,7 +203,7 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def create_dataloader(rank, world_size, dataset, batch_size=256, num_workers=10):
+def create_dataloader(rank, world_size, dataset, batch_size=16, num_workers=10):
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True)
 
@@ -361,7 +361,7 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None, help='Path to the checkpoint file to resume training')
     parser.add_argument('--train_fraction', type=float, default=1.0, help='Fraction of training data to use (0.0 to 1.0)')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--lr', type=float, default=0.0003, help='Learning rate')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--version', type=int, default=2, help='Version of the model')
@@ -394,7 +394,7 @@ def main():
     print("Total parameters:", count_total_parameters(model))
 
     criterion = nn.MSELoss()
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0001)
     num_epochs = args.num_epochs
 
     mp.spawn(
