@@ -73,13 +73,12 @@ class MapDataset(Dataset):
         except Exception as e:
             return torch.zeros(3, 500, 500), torch.zeros(3, 500, 500), torch.zeros(2)
 
+
 class LocationModel(nn.Module):
-    def __init__(self):
+    def __init__(self, dropout_rate=0.5):
         super(LocationModel, self).__init__()
-        resnet = models.resnet50(pretrained=True)
+        resnet = models.resnet18(pretrained=True)
         self.stitched_features = nn.Sequential(*list(resnet.children())[:-2])
-        
-        # resnet34 = models.resnet34(pretrained=True)
         self.basemap_features = nn.Sequential(*list(resnet.children())[:-2])
         
         for param in self.stitched_features.parameters():
@@ -88,63 +87,117 @@ class LocationModel(nn.Module):
             param.requires_grad = False
         
         self.conv_combined = nn.Sequential(
-            nn.Conv2d(4096, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),  # Add BatchNorm here
+            nn.Conv2d(1024, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
             nn.ReLU(),
+            nn.Dropout2d(0.5),
+            nn.Conv2d(512, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.Dropout2d(0.5),
             nn.AdaptiveAvgPool2d((1, 1))
         )
         
         self.fc = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),  # Add BatchNorm here
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Linear(256, 2)
+            nn.Dropout(0.5),
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(64, 2)
         )
 
     def custom_activation(self, x):
         return 250 + 250 * torch.tanh(x)
 
-
     def forward(self, stitched, basemap):
-        
-        #Save stitched and basemap features for visualization
-        # torch.save(stitched, 'stitched_img.pth')
-        # torch.save(basemap, 'basemap_img.pth')
-
-        # print("Stitched: ", stitched.shape)
-        # print("Basemap: ", basemap.shape)
-        
         x_stitched = self.stitched_features(stitched)
         x_basemap = self.basemap_features(basemap)
-
-
-        #Save stitched and basemap features for visualization
-        # torch.save(x_stitched, 'stitched_features.pth')
-        # torch.save(x_basemap, 'basemap_features.pth')
-
-        # print("Stitched Features: ", x_stitched.shape)
-        # print("Basemap Features: ", x_basemap.shape)
-        
-        #x_stitched = nn.functional.adaptive_avg_pool2d(x_stitched, x_basemap.shape[2:])
         
         combined = torch.cat((x_stitched, x_basemap), dim=1)
         
-        # print("Combined:", combined.shape)
-
         x = self.conv_combined(combined)
-
-        # print("Conv Combined:", x.shape)
         x = x.view(x.size(0), -1)
-        # print("Flattened:", x.shape)
         x = self.fc(x)
         x = self.custom_activation(x)
-        # print("FC:", x.shape)
         
         return x
 
+# class LocationModel(nn.Module):
+#     def __init__(self):
+#         super(LocationModel, self).__init__()
+#         resnet = models.resnet18(pretrained=True)
+#         self.stitched_features = nn.Sequential(*list(resnet.children())[:-2])
+        
+#         # resnet34 = models.resnet34(pretrained=True)
+#         self.basemap_features = nn.Sequential(*list(resnet.children())[:-2])
+        
+#         for param in self.stitched_features.parameters():
+#             param.requires_grad = False
+#         for param in self.basemap_features.parameters():
+#             param.requires_grad = False
+        
+#         self.conv_combined = nn.Sequential(
+#             nn.Conv2d(1024, 512, kernel_size=3, padding=1),
+#             nn.BatchNorm2d(512),  # Add BatchNorm here
+#             nn.ReLU(),
+#             nn.AdaptiveAvgPool2d((1, 1))
+#         )
+        
+#         self.fc = nn.Sequential(
+#             nn.Linear(512, 256),
+#             nn.BatchNorm1d(256),  # Add BatchNorm here
+#             nn.ReLU(),
+#             nn.Linear(256, 2)
+#         )
+
+#     def custom_activation(self, x):
+#         return 250 + 250 * torch.tanh(x)
+
+
+#     def forward(self, stitched, basemap):
+        
+#         #Save stitched and basemap features for visualization
+#         # torch.save(stitched, 'stitched_img.pth')
+#         # torch.save(basemap, 'basemap_img.pth')
+
+#         # print("Stitched: ", stitched.shape)
+#         # print("Basemap: ", basemap.shape)
+        
+#         x_stitched = self.stitched_features(stitched)
+#         x_basemap = self.basemap_features(basemap)
+
+
+#         #Save stitched and basemap features for visualization
+#         # torch.save(x_stitched, 'stitched_features.pth')
+#         # torch.save(x_basemap, 'basemap_features.pth')
+
+#         # print("Stitched Features: ", x_stitched.shape)
+#         # print("Basemap Features: ", x_basemap.shape)
+        
+#         #x_stitched = nn.functional.adaptive_avg_pool2d(x_stitched, x_basemap.shape[2:])
+        
+#         combined = torch.cat((x_stitched, x_basemap), dim=1)
+        
+#         # print("Combined:", combined.shape)
+
+#         x = self.conv_combined(combined)
+
+#         # print("Conv Combined:", x.shape)
+#         x = x.view(x.size(0), -1)
+#         # print("Flattened:", x.shape)
+#         x = self.fc(x)
+#         x = self.custom_activation(x)
+#         # print("FC:", x.shape)
+        
+#         return x
+
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12378'
+    os.environ['MASTER_PORT'] = '12308'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -258,7 +311,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, train
             }
             torch.save(checkpoint, 'latest_map_location_model_train_'+unique_name+'.pth')
 
-        if epoch % 10 == 0 or epoch == start_epoch:
+        if epoch % 2 == 0 or epoch == start_epoch:
             model.eval()
             val_loss = 0.0
             with torch.no_grad():
