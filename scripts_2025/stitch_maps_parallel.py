@@ -15,14 +15,14 @@ def get_neighbors(filenames):
     neighbors_dict = {}
 
     for i, fname in enumerate(sorted_files):
-        if total_files < 10:
+        if total_files < 20:
             neighbors_dict[fname] = {
                 "index": i,
                 "neighbors": sorted_files
             }
         else:
-            start = max(0, i - 5)
-            end = min(total_files, i + 6)
+            start = max(0, i - 20)
+            end = min(total_files, i + 20)
             while end - start < 10:
                 if start > 0:
                     start -= 1
@@ -35,6 +35,8 @@ def get_neighbors(filenames):
                 "neighbors": sorted_files[start:end]
             }
     
+    #Print length of neighbors_dict
+    print("Length of neighbors_dict: ", len(neighbors_dict))
     return neighbors_dict
 
 def stitch_bev_maps(image_paths, output_path="stitched_output.png"):
@@ -47,7 +49,7 @@ def stitch_bev_maps(image_paths, output_path="stitched_output.png"):
     status, stitched = stitcher.stitch(images)
 
     if status == cv2.Stitcher_OK:
-        stitched = cv2.resize(stitched, (2048, 1024))
+        # stitched = cv2.resize(stitched, (2048, 1024))
         cv2.imwrite(output_path, stitched)
         return stitched
     else:
@@ -56,8 +58,11 @@ def stitch_bev_maps(image_paths, output_path="stitched_output.png"):
 
 def process_scene(scene_data):
     scene, file_list = scene_data
-    folder_name = "/data1/all_val_maps_gt/map/"
-    output_stitched_maps_folder = "/data1/all_val_maps_gt_stitched/"
+    folder_name = "/data1/all_"+split+"_maps_gt_v2/map/"
+    output_stitched_maps_folder = "/data1/all_"+split+"_maps_gt_v2_stitched/"
+
+    # Create output folder if it doesn't exist
+    Path(output_stitched_maps_folder).mkdir(parents=True, exist_ok=True)
 
     try:
         file_list = [file.split("_metas.npy")[0] for file in file_list]
@@ -72,8 +77,10 @@ def process_scene(scene_data):
     except Exception as e:
         print(f"Error processing scene {scene}: {e}")
 
+split = "val"
+
 if __name__ == "__main__":
-    with open("scene_to_file_map_val.json", "r") as f:
+    with open("scene_to_file_map_v2_"+split+".json", "r") as f:
         scene_to_file_map = json.load(f)
 
     num_processes = mp.cpu_count()-4  # Use all available CPU cores
@@ -86,3 +93,4 @@ if __name__ == "__main__":
 
     pool.close()
     pool.join()
+

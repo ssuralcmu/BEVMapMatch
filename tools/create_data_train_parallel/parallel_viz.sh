@@ -9,3 +9,6 @@ torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_g
 torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_get_gps_train_data_gt_with_gps_perturb_slice_generic.py configs/nuscenes/seg/fusion-bev256d2-lss.yaml --mode gt --split train --out-dir all_train_maps_gt_v2 --start-idx 90000 --end-idx 100000
 torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_get_gps_train_data_gt_with_gps_perturb_slice_generic.py configs/nuscenes/seg/fusion-bev256d2-lss.yaml --mode gt --split train --out-dir all_train_maps_gt_v2 --start-idx 100000 --end-idx 110000
 torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_get_gps_train_data_gt_with_gps_perturb_slice_generic.py configs/nuscenes/seg/fusion-bev256d2-lss.yaml --mode gt --split train --out-dir all_train_maps_gt_v2 --start-idx 110000 --end-idx 123580
+
+
+torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_get_gps_train_data_gt_with_gps_perturb_slice_generic_debug.py configs/nuscenes/seg/fusion-bev256d2-lss.yaml --mode gt --split train --out-dir all_train_maps_gt_v2 --start-idx 0 --end-idx 123580

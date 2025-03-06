@@ -7,10 +7,10 @@ import json
 
 
 nusc = NuScenes(version='v1.0-trainval', dataroot='/data1/data/nuscenes/', verbose=True)
-split="train"
+split="val"
 
 # Define the folder path
-folder_path = "../all_"+split+"_metas"
+folder_path = "../all_"+split+"_metas_v2"
 
 # Get a list of all .npy files in the folder
 npy_files = [f for f in os.listdir(folder_path) if f.endswith('.npy')]
@@ -22,18 +22,21 @@ print("loaded")
 all_scenes= {}
 
 for i, file in enumerate(tqdm(npy_files, desc="Processing Files")):    
-    file_path = os.path.join(folder_path, file)
-    data = np.load(file_path, allow_pickle=True).item()
-    sample = nusc.get('sample', data['token'])  # scene_token might actually be a sample_token
-    scene_token = sample['scene_token']       # Get the correct scene token
-    scene = nusc.get('scene', scene_token)    # Now fetch the scene
+    try:
+        file_path = os.path.join(folder_path, file)
+        data = np.load(file_path, allow_pickle=True).item()
+        sample = nusc.get('sample', data['token'])  # scene_token might actually be a sample_token
+        scene_token = sample['scene_token']       # Get the correct scene token
+        scene = nusc.get('scene', scene_token)    # Now fetch the scene
 
-    # print("Scene Token:", scene_token)
+        # print("Scene Token:", scene_token)
 
-    if scene_token not in all_scenes:
-        all_scenes[scene_token] = [file]
-    else:
-        all_scenes[scene_token].append(file)
+        if scene_token not in all_scenes:
+            all_scenes[scene_token] = [file]
+        else:
+            all_scenes[scene_token].append(file)
+    except Exception as e:
+        continue
     
 
 
@@ -67,5 +70,5 @@ for i, file in enumerate(tqdm(npy_files, desc="Processing Files")):
     # # print("Global coordinates:", global_xyz)
     # # print("Rotation:", ego_pose['rotation'])
 
-with open("scene_to_file_map_"+split+".json", "w") as file:
+with open("scene_to_file_map_v2_"+split+".json", "w") as file:
     json.dump(all_scenes, file, indent=4)

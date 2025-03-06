@@ -69,6 +69,8 @@ def render_map_patch_to_array(nusc_map, *args, dpi=200, **kwargs):
     
     # Close the figure to free up memory
     fig.clf()
+
+    plt.close(fig)
     
     # Convert buffer to numpy array
     buf.seek(0)
@@ -216,6 +218,8 @@ def main() -> None:
             # Save the image to a file
             image.save(save_path)
             # print(f"Map image saved at: {save_path}")
+
+            plt.close('all')
             
             #Save metas variable to file
             # print("Saving metas variable...")

@@ -22,3 +22,11 @@
 /scripts_2025/*.pth
 
 /scripts_2025/eval_results*
+
+/scripts_2025/logs/*
+
+/scripts_2025/temp
+
+/scripts_2025/v2_v3_models/*
+
+*.png
