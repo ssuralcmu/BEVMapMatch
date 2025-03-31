@@ -27,15 +27,18 @@ class MapDataset(Dataset):
         
         stitched_files = os.listdir(stitched_folder)
 
+        # print(stitched_files[0:10])
         self.file_triplets = []
         for stitched_file in stitched_files:
-            if stitched_file.endswith("_generated_map_image.png"):
-                prefix = stitched_file.split("_generated_map_image.png")[0]
+            if stitched_file.endswith("_stitched_map.png"):
+                prefix = stitched_file.split("_stitched_map.png")[0]
                 basemap_file = f"{prefix}_base_map_image.png"
                 metas_file = f"{prefix}_metas.npy"
                 if os.path.exists(os.path.join(basemap_folder, basemap_file)):
                     if os.path.exists(os.path.join(metas_folder, metas_file)):
                         self.file_triplets.append((stitched_file, basemap_file, metas_file))
+
+        print("Length of dataset: ", len(self.file_triplets))
 
     def __len__(self):
         return len(self.file_triplets)
@@ -54,6 +57,10 @@ class MapDataset(Dataset):
             basemap_img = np.array(basemap_img)
             basemap_img = np.flipud(basemap_img)
             basemap_img = Image.fromarray(basemap_img)
+
+            #If the stitched image has any dimension greater than 5000, return a zero tensor
+            if stitched_img.size[0] > 5000 or stitched_img.size[1] > 5000:
+                return torch.zeros(3, 500, 500), torch.zeros(3, 500, 500), torch.zeros(2)
 
             if self.transform_gen:
                 stitched_img = self.transform_gen(stitched_img)
@@ -205,7 +212,7 @@ def cleanup():
 
 def create_dataloader(rank, world_size, dataset, batch_size=16, num_workers=10):
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True)
+    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, drop_last=True, pin_memory=True)
 
 def count_trainable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -311,7 +318,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, train
             }
             torch.save(checkpoint, 'latest_map_location_model_train_'+unique_name+'.pth')
 
-        if epoch % 2 == 0 or epoch == start_epoch:
+        if epoch % 10 == 0 or epoch == start_epoch:
             model.eval()
             val_loss = 0.0
             with torch.no_grad():
@@ -360,11 +367,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', type=str, default=None, help='Path to the checkpoint file to resume training')
     parser.add_argument('--train_fraction', type=float, default=1.0, help='Fraction of training data to use (0.0 to 1.0)')
-    parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
+    parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--lr', type=float, default=0.0003, help='Learning rate')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--version', type=int, default=2, help='Version of the model')
+    parser.add_argument('--version', type=int, default=4, help='Version of the model')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -384,10 +391,10 @@ def main():
         transforms.ToTensor(),
     ])
 
-    train_dataset = MapDataset(base_folder+'all_train_metas_v2_500m', base_folder+'all_train_basemaps_v2_500m', base_folder+'all_train_maps_gt_v2_500m/map/', transform_base=transform_base, transform_gen=transform_gen)
+    train_dataset = MapDataset(base_folder+'all_train_metas_v2', base_folder+'all_train_basemaps_v2', base_folder+'all_train_maps_gt_v2_stitched/', transform_base=transform_base, transform_gen=transform_gen)
     
 
-    val_dataset = MapDataset(base_folder+'all_val_metas_v2_500m', base_folder+'all_val_basemaps_v2_500m', base_folder+'all_val_maps_gt_v2_500m/map/', transform_base=transform_base, transform_gen=transform_gen)
+    val_dataset = MapDataset(base_folder+'all_val_metas_v2', base_folder+'all_val_basemaps_v2', base_folder+'all_val_maps_gt_v2_stitched/', transform_base=transform_base, transform_gen=transform_gen)
 
     model = LocationModel()
     print("Trainable parameters:", count_trainable_parameters(model))

@@ -135,16 +135,9 @@ def main() -> None:
     #Initialize generic empty set
     all_names = set()
     count=0
-    for data in dataflow:
-        count+=1
-        if count%10==0:
-            print("Count: ", count)
-        # start = time.time()
-        # metas = data["metas"].data[0][0]
-        # name = "{}-{}".format(metas["timestamp"], metas["token"])
-        # all_names.add(name)
-    
-    print("Length of all_names: ", len(all_names))
+
+    print("Length of dataset: ", len(dataset))
+
 
 
 if __name__ == "__main__":

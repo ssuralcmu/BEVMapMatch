@@ -144,6 +144,16 @@ def main() -> None:
             # print("Data metas:",data["metas"].data[0][0].keys())
             metas = data["metas"].data[0][0]
 
+            name = "{}-{}".format(metas["timestamp"], metas["token"])
+
+            save_path = 'all_val_basemaps_v2_500m/'+name+"_base_map_image.png"  # Change this to your desired save location
+            metas_save_path = 'all_val_metas_v2_500m/'+name+"_metas.npy"  # Change this to your desired save
+            #Make directory if it does not exist
+            # os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            #Check if file already exists
+            if os.path.exists(save_path) and os.path.exists(metas_save_path):
+                continue
+
             token = metas['token']
 
             sample = nusc.get('sample', token)  # scene_token might actually be a sample_token
@@ -180,6 +190,11 @@ def main() -> None:
             global_xyz = ego_pose['translation']  # [x, y, z]
 
 
+            # patch_size = 500  # 200 meters in each direction (1km total)
+            
+            # # Perturb the global coordinates
+            # perturbation = np.random.randint(-1*(patch_size-100), (patch_size-100), size=2)
+
             # Define the map patch around the ego vehicle
             patch_size = 250  # 200 meters in each direction (1km total)
             
@@ -187,6 +202,7 @@ def main() -> None:
             perturbation = np.random.randint(-1*(patch_size-200), (patch_size-200), size=2)
             global_xyz[0] += perturbation[0]
             global_xyz[1] += perturbation[1]
+
 
             metas['perturbation'] = perturbation
             metas['new_global_xyz'] = global_xyz
@@ -209,19 +225,11 @@ def main() -> None:
 
             # Save the figure
 
-            name = "{}-{}".format(metas["timestamp"], metas["token"])
 
-
-            save_path = 'all_train_basemaps_v2_500m/'+name+"_base_map_image.png"  # Change this to your desired save location
-            metas_save_path = 'all_train_metas_v2_500m/'+name+"_metas.npy"  # Change this to your desired save
-            #Make directory if it does not exist
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            #Check if file already exists
-            if os.path.exists(save_path) and os.path.exists(metas_save_path):
-                continue
             image = Image.fromarray(map_array)
 
             # Save the image to a file
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
             image.save(save_path)
             # print(f"Map image saved at: {save_path}")
 
@@ -232,6 +240,7 @@ def main() -> None:
             #Make directory if it does not exist
             os.makedirs(os.path.dirname(metas_save_path), exist_ok=True)
             np.save(metas_save_path, metas)
+
 
 
             if args.mode == "pred":

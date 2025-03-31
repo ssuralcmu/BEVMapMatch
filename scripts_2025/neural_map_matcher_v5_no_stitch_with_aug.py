@@ -6,7 +6,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms, models
-from PIL import Image
+from PIL import Image, ImageOps
 from tqdm import tqdm
 import numpy as np
 import torch.distributed as dist
@@ -14,20 +14,23 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
 import json
 import argparse
-
+import random
 
 
 class MapDataset(Dataset):
-    def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
+    def __init__(self, metas_folder, basemap_folder, stitched_folder, 
+                 transform_base=None, transform_gen=None, augment=False):  # Add augment flag
         self.basemap_folder = basemap_folder
         self.stitched_folder = stitched_folder
         self.metas_folder = metas_folder
         self.transform_base = transform_base
         self.transform_gen = transform_gen
+        self.augment = augment  # New augmentation flag
         
         stitched_files = os.listdir(stitched_folder)
 
-        self.file_triplets = []
+        # Store original file triplets
+        self.original_triplets = []
         for stitched_file in stitched_files:
             if stitched_file.endswith("_generated_map_image.png"):
                 prefix = stitched_file.split("_generated_map_image.png")[0]
@@ -35,14 +38,19 @@ class MapDataset(Dataset):
                 metas_file = f"{prefix}_metas.npy"
                 if os.path.exists(os.path.join(basemap_folder, basemap_file)):
                     if os.path.exists(os.path.join(metas_folder, metas_file)):
-                        self.file_triplets.append((stitched_file, basemap_file, metas_file))
+                        self.original_triplets.append((stitched_file, basemap_file, metas_file))
+
+        # Double the dataset size by including originals and augmented versions
+        self.file_triplets = self.original_triplets * 2 if augment else self.original_triplets
 
     def __len__(self):
         return len(self.file_triplets)
 
     def __getitem__(self, idx):
         try:
-            stitched_file, basemap_file, metas_file = self.file_triplets[idx]
+            # Map index to original data point
+            original_idx = idx % len(self.original_triplets)
+            stitched_file, basemap_file, metas_file = self.original_triplets[original_idx]
             
             stitched_img_path = os.path.join(self.stitched_folder, stitched_file)
             basemap_img_path = os.path.join(self.basemap_folder, basemap_file)
@@ -55,8 +63,38 @@ class MapDataset(Dataset):
             basemap_img = np.flipud(basemap_img)
             basemap_img = Image.fromarray(basemap_img)
 
-            if self.transform_gen:
-                stitched_img = self.transform_gen(stitched_img)
+            # Apply augmentations to 2 out of 3 copies
+            if self.augment and idx >= len(self.original_triplets):
+                # Random rotation (-25° to +25°)
+                angle = random.choice(range(-180, 181, 45))
+                stitched_img = stitched_img.rotate(angle, expand=True)
+                
+                # Random scaling (85%-115%)
+                scale = random.uniform(0.85, 1.15)
+                new_size = int(stitched_img.width * scale)
+                stitched_img = stitched_img.resize((new_size, new_size), Image.BILINEAR)
+                
+                # Maintain 500x500 size
+                if new_size < 500:
+                    pad = (500 - new_size) // 2
+                    stitched_img = ImageOps.expand(stitched_img, border=pad, fill=0)
+                else:
+                    left = (new_size - 500) // 2
+                    top = (new_size - 500) // 2
+                    stitched_img = stitched_img.crop((left, top, left+500, top+500))
+
+                # Apply transforms
+                if self.transform_gen:
+                    stitched_img = self.transform_gen(stitched_img)
+                else:
+                    stitched_img = transforms.ToTensor()(stitched_img) #If transform_gen is none and augment is none, run ToTensor
+            else:
+                # Apply transforms to original images
+                if self.transform_gen:
+                    stitched_img = self.transform_gen(stitched_img)
+                else:
+                    stitched_img = transforms.ToTensor()(stitched_img)
+
             if self.transform_base:
                 basemap_img = self.transform_base(basemap_img)
 
@@ -72,6 +110,7 @@ class MapDataset(Dataset):
             return stitched_img, basemap_img, location
         except Exception as e:
             return torch.zeros(3, 500, 500), torch.zeros(3, 500, 500), torch.zeros(2)
+
 
 
 class LocationModel(nn.Module):
@@ -126,78 +165,9 @@ class LocationModel(nn.Module):
         
         return x
 
-# class LocationModel(nn.Module):
-#     def __init__(self):
-#         super(LocationModel, self).__init__()
-#         resnet = models.resnet18(pretrained=True)
-#         self.stitched_features = nn.Sequential(*list(resnet.children())[:-2])
-        
-#         # resnet34 = models.resnet34(pretrained=True)
-#         self.basemap_features = nn.Sequential(*list(resnet.children())[:-2])
-        
-#         for param in self.stitched_features.parameters():
-#             param.requires_grad = False
-#         for param in self.basemap_features.parameters():
-#             param.requires_grad = False
-        
-#         self.conv_combined = nn.Sequential(
-#             nn.Conv2d(1024, 512, kernel_size=3, padding=1),
-#             nn.BatchNorm2d(512),  # Add BatchNorm here
-#             nn.ReLU(),
-#             nn.AdaptiveAvgPool2d((1, 1))
-#         )
-        
-#         self.fc = nn.Sequential(
-#             nn.Linear(512, 256),
-#             nn.BatchNorm1d(256),  # Add BatchNorm here
-#             nn.ReLU(),
-#             nn.Linear(256, 2)
-#         )
-
-#     def custom_activation(self, x):
-#         return 250 + 250 * torch.tanh(x)
-
-
-#     def forward(self, stitched, basemap):
-        
-#         #Save stitched and basemap features for visualization
-#         # torch.save(stitched, 'stitched_img.pth')
-#         # torch.save(basemap, 'basemap_img.pth')
-
-#         # print("Stitched: ", stitched.shape)
-#         # print("Basemap: ", basemap.shape)
-        
-#         x_stitched = self.stitched_features(stitched)
-#         x_basemap = self.basemap_features(basemap)
-
-
-#         #Save stitched and basemap features for visualization
-#         # torch.save(x_stitched, 'stitched_features.pth')
-#         # torch.save(x_basemap, 'basemap_features.pth')
-
-#         # print("Stitched Features: ", x_stitched.shape)
-#         # print("Basemap Features: ", x_basemap.shape)
-        
-#         #x_stitched = nn.functional.adaptive_avg_pool2d(x_stitched, x_basemap.shape[2:])
-        
-#         combined = torch.cat((x_stitched, x_basemap), dim=1)
-        
-#         # print("Combined:", combined.shape)
-
-#         x = self.conv_combined(combined)
-
-#         # print("Conv Combined:", x.shape)
-#         x = x.view(x.size(0), -1)
-#         # print("Flattened:", x.shape)
-#         x = self.fc(x)
-#         x = self.custom_activation(x)
-#         # print("FC:", x.shape)
-        
-#         return x
-
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12308'
+    os.environ['MASTER_PORT'] = '13499'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -224,6 +194,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, train
     model = DDP(model, device_ids=[rank])
     print("Checkpoint path: ", checkpoint_path)
 
+    criterion = criterion.to(device)
 
     if fraction >= 1.0:
         print("FULL TRAINING")
@@ -364,7 +335,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--lr', type=float, default=0.0003, help='Learning rate')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--version', type=int, default=2, help='Version of the model')
+    parser.add_argument('--version', type=int, default=5, help='Version of the model')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -384,10 +355,10 @@ def main():
         transforms.ToTensor(),
     ])
 
-    train_dataset = MapDataset(base_folder+'all_train_metas_v2_500m', base_folder+'all_train_basemaps_v2_500m', base_folder+'all_train_maps_gt_v2_500m/map/', transform_base=transform_base, transform_gen=transform_gen)
+    train_dataset = MapDataset(base_folder+'all_train_metas_v2', base_folder+'all_train_basemaps_v2', base_folder+'all_train_maps_gt_v2/map/', transform_base=transform_base, transform_gen=transform_gen, augment=True)
     
 
-    val_dataset = MapDataset(base_folder+'all_val_metas_v2_500m', base_folder+'all_val_basemaps_v2_500m', base_folder+'all_val_maps_gt_v2_500m/map/', transform_base=transform_base, transform_gen=transform_gen)
+    val_dataset = MapDataset(base_folder+'all_val_metas_v2', base_folder+'all_val_basemaps_v2', base_folder+'all_val_maps_gt_v2/map/', transform_base=transform_base, transform_gen=transform_gen, augment=False)
 
     model = LocationModel()
     print("Trainable parameters:", count_trainable_parameters(model))

@@ -530,7 +530,7 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None, help='Path to the checkpoint file to resume training')
     parser.add_argument('--train_fraction', type=float, default=1.0, help='Fraction of training data to use (0.0 to 1.0)')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
     parser.add_argument('--lr', type=float, default=0.0003, help='Learning rate')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--version', type=int, default=3, help='Version of the model')
@@ -553,10 +553,10 @@ def main():
         transforms.ToTensor(),
     ])
 
-    train_dataset = MapDataset(base_folder+'all_train_metas_v2', base_folder+'all_train_basemaps_v2', base_folder+'all_train_maps_gt_v2/map/', transform_base=transform_base, transform_gen=transform_gen)
+    train_dataset = MapDataset(base_folder+'all_train_metas_v2_500m', base_folder+'all_train_basemaps_v2_500m', base_folder+'all_train_maps_gt_v2_500m/map/', transform_base=transform_base, transform_gen=transform_gen)
     
 
-    val_dataset = MapDataset(base_folder+'all_val_metas_v2', base_folder+'all_val_basemaps_v2', base_folder+'all_val_maps_gt_v2/map/', transform_base=transform_base, transform_gen=transform_gen)
+    val_dataset = MapDataset(base_folder+'all_val_metas_v2_500m', base_folder+'all_val_basemaps_v2_500m', base_folder+'all_val_maps_gt_v2_500m/map/', transform_base=transform_base, transform_gen=transform_gen)
 
     model = LocationModel()
     print("Trainable parameters:", count_trainable_parameters(model))
