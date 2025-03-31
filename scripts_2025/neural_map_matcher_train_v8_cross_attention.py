@@ -93,122 +93,60 @@ class MapDataset(Dataset):
 
 class GridClassifier(nn.Module):
     def __init__(self):
-        super(GridClassifier, self).__init__()
+        super().__init__()
+        
+        # Feature extractor
         resnet = models.resnet18(pretrained=True)
         self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
         
-        # Grid processing
-        self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))  # For 1000x1000 -> 10x10 grids
-        self.stitched_pool = nn.AdaptiveAvgPool2d((1, 1))
+        # 3x3 processing
+        self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))
+        
+        # Cross-attention with local constraints
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=512, 
+            num_heads=8,
+            batch_first=True
+        )
+        
+        # Positional encoding
+        self.pos_embed = nn.Parameter(torch.randn(100, 512)*0.02)
+        
+        # 3x3 attention mask
+        self.register_buffer('attn_mask', self.create_local_mask())
+        
+        self.fc = nn.Linear(512, 100) 
+
+    def create_local_mask(self):
+        """Create (1, 100) mask allowing queries to see all 3x3 regions"""
+        # Allow full attention since we pre-processed 3x3 context
+        return torch.zeros(1, 100, dtype=torch.bool)  # No masking
 
     def forward(self, stitched, basemap):
-
+        # Feature extraction
         stitched_feat = self.feature_extractor(stitched)  # (B,512,7,7)
         basemap_feat = self.feature_extractor(basemap)    # (B,512,25,25)
         
-        grid_features = self.grid_pool(basemap_feat)      # (B,512,10,10)
-        grid_features = F.unfold(grid_features, kernel_size=3, padding=1)  # (B,512*9,100)
+        # Process basemap to 10x10 grid with 3x3 context
+        grid = self.grid_pool(basemap_feat)  # (B,512,10,10)
+        grid_3x3 = F.unfold(grid, kernel_size=3, padding=1)  # (B,512*9,100)
+        grid_3x3 = grid_3x3.view(-1, 512, 9, 100).mean(dim=2)  # (B,512,100)
         
-        # Process stitched features
-        stitched_feat = self.stitched_pool(stitched_feat)  # (B,512,1,1)
+        # Prepare attention inputs
+        query = F.adaptive_avg_pool2d(stitched_feat, (1,1)).flatten(1)  # (B,512)
+        key = value = grid_3x3.permute(0,2,1) + self.pos_embed  # (B,100,512)
         
-        # Calculate similarity for 3x3 regions
-        batch_size = stitched_feat.size(0)
-        scores = torch.zeros(batch_size, 100).to(stitched.device)  # 100 possible centers
+        # Cross-attention with corrected mask
+        scores, _ = self.cross_attn(
+            query=query.unsqueeze(1),  # (B,1,512)
+            key=key,                   # (B,100,512)
+            value=value,               # (B,100,512)
+            attn_mask=self.attn_mask   # (1,100)
+        )
+
+        scores = self.fc(scores.squeeze(1))
         
-        # Compare each 3x3 window
-        window_features = grid_features.view(batch_size, 512, 9, 100)  # (B,512,9,100)
-        window_features = window_features.mean(dim=2)  # Average 3x3 features (B,512,100)
-        stitched_feat = stitched_feat.squeeze(-1).squeeze(-1)  # (B,512)
-        scores = F.cosine_similarity(stitched_feat.unsqueeze(-1), window_features, dim=1)
-
-        return scores
-
-# class GridClassifier(nn.Module):
-#     def __init__(self):
-#         super(GridClassifier, self).__init__()
-#         resnet = models.resnet18(pretrained=True)
-#         self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
-        
-#         # Add regularization components
-#         self.feat_dropout = nn.Dropout2d(0.25)  # Spatial dropout [1][5]
-#         self.grid_bn = nn.BatchNorm2d(512)      # After pooling [4][8]
-#         self.window_bn = nn.BatchNorm2d(512)    # Window normalization [7][8]
-
-#         # Original pooling layers
-#         self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))
-#         self.stitched_pool = nn.AdaptiveAvgPool2d((1, 1))
-
-#     def forward(self, stitched, basemap):
-#         # Feature extraction with dropout
-#         stitched_feat = self.feat_dropout(self.feature_extractor(stitched))
-#         basemap_feat = self.feat_dropout(self.feature_extractor(basemap))
-        
-#         # Grid processing with batch norm
-#         grid_features = self.grid_pool(basemap_feat)
-#         grid_features = self.grid_bn(grid_features)  # BN after pooling [6][8]
-#         grid_features = F.unfold(grid_features, kernel_size=3, padding=1)
-
-#         # Stitched feature processing
-#         stitched_feat = self.stitched_pool(stitched_feat)
-        
-#         batch_size = stitched_feat.size(0)
-#         scores = torch.zeros(batch_size, 100).to(stitched.device)
-
-#         for i in range(10):
-#             for j in range(10):
-#                 window = grid_features[:, :, i*10 + j].view(batch_size, 512, 3, 3)
-#                 window = self.window_bn(window)  # Window-level BN [3][6]
-#                 window_feat = F.adaptive_avg_pool2d(window, (1,1))
-                
-#                 sim = F.cosine_similarity(stitched_feat, window_feat, dim=1)
-#                 scores[:, i*10 + j] = sim.squeeze()
-        
-#         return scores
-
-
-
-
-# class GridClassifier(nn.Module):
-#     def __init__(self):
-#         super(GridClassifier, self).__init__()
-#         resnet = models.resnet18(pretrained=True)
-#         self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
-        
-#         # Grid processing
-#         self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))  # For 1000x1000 -> 10x10 grids
-#         self.stitched_pool = nn.AdaptiveAvgPool2d((1, 1))
-
-#     def forward(self, stitched, basemap):
-
-#         stitched_feat = self.feature_extractor(stitched)  # (B,512,7,7)
-#         basemap_feat = self.feature_extractor(basemap)    # (B,512,25,25)
-        
-#         grid_features = self.grid_pool(basemap_feat)      # (B,512,10,10)
-#         grid_features = F.unfold(grid_features, kernel_size=3, padding=1)  # (B,512*9,100)
-        
-#         # Process stitched features
-#         stitched_feat = self.stitched_pool(stitched_feat)  # (B,512,1,1)
-        
-#         # Calculate similarity for 3x3 regions
-#         batch_size = stitched_feat.size(0)
-#         scores = torch.zeros(batch_size, 100).to(stitched.device)  # 100 possible centers
-        
-#         # Compare each 3x3 window
-#         for i in range(10):
-#             for j in range(10):
-#                 # Get 3x3 window (handles edge cases)
-#                 window = grid_features[:, :, i*10 + j]  # (B, 512*9)
-#                 window = window.view(batch_size, 512, 3, 3)  # (B,512,3,3)
-                
-#                 # Average pool window features
-#                 window_feat = F.adaptive_avg_pool2d(window, (1,1))  # (B,512,1,1)
-                
-#                 # Calculate similarity
-#                 sim = F.cosine_similarity(stitched_feat, window_feat, dim=1)
-#                 scores[:, i*10 + j] = sim.squeeze()
-        
-
+        return scores  # (B,100)
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=0.9, gamma=2.5):
@@ -398,7 +336,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0003)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="7_vectorized")
+    parser.add_argument('--version', type=str, default="8")
     args = parser.parse_args()
 
     # Data transforms
@@ -451,22 +389,5 @@ def main():
         nprocs=world_size,
         join=True
     )
-    # train_model(
-    #     rank=0,  # For single GPU run, we can set rank to 0
-    #     world_size=1,  # Set to 1 for single GPU
-    #     num_epochs=args.num_epochs,
-    #     model=model,
-    #     criterion=criterion,
-    #     optimizer=optimizer,
-    #     train_dataset=train_dataset,
-    #     val_dataset=val_dataset,
-    #     batch_size=args.batch_size,
-    #     lr=args.lr,
-    #     version=args.version,
-    #     fraction=args.train_fraction,
-    #     checkpoint_path=args.checkpoint,
-    #     seed=args.seed
-    # )
-
 if __name__ == '__main__':
     main()
