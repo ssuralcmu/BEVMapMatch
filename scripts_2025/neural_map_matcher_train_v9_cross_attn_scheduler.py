@@ -183,7 +183,7 @@ def count_trainable_parameters(model):
 def count_total_parameters(model):
     return sum(p.numel() for p in model.parameters())
 
-def train_model(rank, world_size, num_epochs, model, criterion, optimizer, 
+def train_model(rank, world_size, num_epochs, model, criterion, optimizer, scheduler,
                train_dataset, val_dataset, batch_size, lr, version, fraction, 
                checkpoint_path, seed):
     setup(rank, world_size)
@@ -197,7 +197,10 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
     # pos_weight = torch.ones(100) * (91 / 9)  # Shape: (100,) and 9 positive out of 100
     # pos_weight = pos_weight.to(device)
     # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
+    scheduler=torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
+    T_max=1000,  # Number of iterations for one annealing cycle
+    eta_min=1e-5 # Minimum learning rate
+    )
 
     criterion = DiceLoss(
         mode="binary",        # Binary segmentation task
@@ -227,6 +230,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
             checkpoint = torch.load(checkpoint_path)
             model.module.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             losses = checkpoint['losses']
             subset_indices = checkpoint['subset_indices']  # Load the indices
@@ -248,6 +252,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
             checkpoint = torch.load(checkpoint_path)
             model.module.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             losses = checkpoint['losses']
             subset_indices = checkpoint['subset_indices']  # Load the indices
@@ -282,7 +287,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             loss.backward()
             optimizer.step()
-            
+            scheduler.step()
+
             total_loss += loss.item()
             pbar.set_postfix({'loss': total_loss/(pbar.n+1)})
 
@@ -316,6 +322,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
             'epoch': epoch,
             'model_state_dict': model.module.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'losses': losses,
             'subset_indices': subset_indices  # Save the indices
             }
@@ -369,6 +376,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 'epoch': epoch,
                 'model_state_dict': model.module.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
                 'losses': losses,
                 'subset_indices': subset_indices  # Save the indices
                 }
@@ -410,10 +418,10 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0003)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_DiceLoss")
+    parser.add_argument('--version', type=str, default="9_DiceLoss")
     args = parser.parse_args()
 
-    # Data transforms
+  # Data transforms
     transform_base = transforms.Compose([
         transforms.Resize((1000, 1000)),
         transforms.ToTensor(),
@@ -445,20 +453,24 @@ def main():
     print("Trainable parameters:", count_trainable_parameters(model))
     print("Total parameters:", count_total_parameters(model))
 
-    criterion=None
-
+    criterion = None
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+
+    # Initialize CyclicLR scheduler
+    scheduler = None 
     
     # Distributed training
     world_size = torch.cuda.device_count()
     mp.spawn(
         train_model,
-        args=(world_size, args.num_epochs, model, criterion, optimizer,
+        args=(world_size, args.num_epochs, model, criterion, optimizer, scheduler,
               train_dataset, val_dataset, args.batch_size, args.lr,
-              args.version, args.train_fraction, args.checkpoint, args.seed),
+              args.version, args.train_fraction, args.checkpoint,
+              args.seed),  # Pass scheduler as an argument
         nprocs=world_size,
         join=True
     )
+
 if __name__ == '__main__':
     main()
