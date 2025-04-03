@@ -1,0 +1,1 @@
+[{"stitched_img_path": ["/data1/all_val_maps_gt_v2/map/1542799501198279-fcb1422b6f6241939953d032f2cc2ce8_generated_map_image.png"], "basemap_img_path": ["/data1/all_val_basemaps_v2/1542799501198279-fcb1422b6f6241939953d032f2cc2ce8_base_map_image.png"], "metas_path": ["/data1/all_val_metas_v2/1542799501198279-fcb1422b6f6241939953d032f2cc2ce8_metas.npy"], "predictions": 

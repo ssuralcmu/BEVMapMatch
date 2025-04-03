@@ -93,6 +93,92 @@ class MapDataset(Dataset):
         except Exception as e:
             return torch.zeros(3, 100, 100), torch.zeros(3, 1000, 1000), torch.zeros(100), "", "", ""
 
+class GridClassifier_WithDropBN(nn.Module):
+    def __init__(self, dropout_rate=0.3):
+        super().__init__()
+        
+        # Feature extractor
+        resnet = models.resnet18(pretrained=True)
+        self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
+        
+        # Batch normalization after feature extraction
+        self.bn1 = nn.BatchNorm2d(512)
+        
+        # Dropout after feature extraction
+        self.dropout1 = nn.Dropout(p=dropout_rate)
+        
+        # 3x3 processing
+        self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))
+        
+        # Batch normalization after grid pooling
+        self.bn2 = nn.BatchNorm2d(512)
+        
+        # Cross-attention with local constraints
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=512, 
+            num_heads=8,
+            batch_first=True,
+            dropout=dropout_rate  # Add dropout within attention
+        )
+        
+        # Positional encoding
+        self.pos_embed = nn.Parameter(torch.randn(100, 512)*0.02)
+        
+        # 3x3 attention mask
+        self.register_buffer('attn_mask', self.create_local_mask())
+        
+        # Dropout before final classification
+        self.dropout2 = nn.Dropout(p=dropout_rate)
+        
+        # Batch normalization before final classification
+        self.bn3 = nn.BatchNorm1d(512)
+        
+        self.fc = nn.Linear(512, 100)
+
+    def create_local_mask(self):
+        """Create (1, 100) mask allowing queries to see all 3x3 regions"""
+        # Allow full attention since we pre-processed 3x3 context
+        return torch.zeros(1, 100, dtype=torch.bool)  # No masking
+
+    def forward(self, stitched, basemap):
+        # Feature extraction with batch norm and dropout
+        stitched_feat = self.feature_extractor(stitched)  # (B,512,7,7)
+        stitched_feat = self.bn1(stitched_feat)
+        stitched_feat = self.dropout1(stitched_feat)
+        
+        basemap_feat = self.feature_extractor(basemap)    # (B,512,25,25)
+        basemap_feat = self.bn1(basemap_feat)
+        basemap_feat = self.dropout1(basemap_feat)
+        
+        # Process basemap to 10x10 grid with 3x3 context
+        grid = self.grid_pool(basemap_feat)  # (B,512,10,10)
+        grid = self.bn2(grid)
+        
+        grid_3x3 = F.unfold(grid, kernel_size=3, padding=1)  # (B,512*9,100)
+        grid_3x3 = grid_3x3.view(-1, 512, 9, 100).mean(dim=2)  # (B,512,100)
+        
+        # Prepare attention inputs
+        query = F.adaptive_avg_pool2d(stitched_feat, (1,1)).flatten(1)  # (B,512)
+        key = value = grid_3x3.permute(0,2,1) + self.pos_embed  # (B,100,512)
+        
+        # Cross-attention with corrected mask
+        scores, _ = self.cross_attn(
+            query=query.unsqueeze(1),  # (B,1,512)
+            key=key,                   # (B,100,512)
+            value=value,               # (B,100,512)
+            attn_mask=self.attn_mask   # (1,100)
+        )
+        
+        # Apply batch norm and dropout before final classification
+        scores = scores.squeeze(1)  # (B,512)
+        scores = self.bn3(scores)
+        scores = self.dropout2(scores)
+        
+        scores = self.fc(scores)
+        
+        return scores  # (B,100)
+
+
 class GridClassifier(nn.Module):
     def __init__(self):
         super().__init__()
@@ -166,7 +252,7 @@ class FocalLoss(nn.Module):
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12338'
+    os.environ['MASTER_PORT'] = '12738'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -199,15 +285,15 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
     # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
 
-    criterion = DiceLoss(
-        mode="binary",        # Binary segmentation task
-        from_logits=True,     # Model outputs raw logits (before sigmoid)
-        smooth=1e-6,          # Small value to prevent division by zero
-        eps=1e-7              # Numerical stability
-    )
+    # criterion = DiceLoss(
+    #     mode="binary",        # Binary segmentation task
+    #     from_logits=True,     # Model outputs raw logits (before sigmoid)
+    #     smooth=1e-6,          # Small value to prevent division by zero
+    #     eps=1e-7              # Numerical stability
+    # )
     # criterion = FocalBCEWithLogitsLoss(alpha=1, gamma=0)
 
-    #criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCEWithLogitsLoss()
     # criterion = FocalLoss(alpha=0.9, gamma=2)
     # criterion = lambda inputs, targets: sigmoid_focal_loss(
     #     inputs, targets, alpha=0.9, gamma=2.5, reduction="mean"
@@ -262,109 +348,57 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
     best_train_loss = min(loss for epoch, loss, _, _ in losses["train"]) if losses["train"] else float('inf')
     
     for epoch in range(start_epoch, num_epochs):
-        model.train()
-        train_loader.sampler.set_epoch(epoch)
-        total_loss = 0.0
-        correct = 0
-        total = 0
-        total_iou = 0.0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", disable=rank != 0)
-        for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
-            stitched = stitched.to(device)
-            basemap = basemap.to(device)
-            labels = labels.to(device)
-            
-            optimizer.zero_grad()
-            # import pdb; pdb.set_trace()
-
-            outputs = model(stitched, basemap)
-            loss = criterion(outputs, labels)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            pbar.set_postfix({'loss': total_loss/(pbar.n+1)})
-
-            _, top3 = torch.topk(outputs, 3, dim=1)
-            correct += (labels.gather(1, top3).sum(dim=1) > 0).sum().item()
-            total += labels.size(0)
-
-            #Calculate IOU
-            _, top9 = torch.topk(outputs, 9, dim=1)  # Shape: (B, 9)
-            # Create binary predictions tensor based on top-9 indices
-            predictions = torch.zeros_like(labels)
-            predictions.scatter_(1, top9, 1)
-
-            # Calculate Intersection over Union (IoU)
-            intersection = (predictions * labels).sum(dim=1)  # Element-wise multiplication and sum
-            union = ((predictions + labels) > 0).sum(dim=1)  # Union is the count of non-zero elements
-
-            # IoU as a percentage
-            iou_percentage = (intersection / union * 100).mean().item()
-            total_iou += iou_percentage
-        
-        train_loss = total_loss / len(train_loader)
-        train_acc = correct / total
-        train_iou = total_iou / len(train_loader)
-        losses["train"].append([epoch, train_loss, train_acc, train_iou])
-
-        if rank == 0:
-            if train_loss < best_train_loss:
-                best_train_loss = train_loss
-            checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': model.module.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'losses': losses,
-            'subset_indices': subset_indices  # Save the indices
-            }
-            torch.save(checkpoint, 'latest_map_location_model_train_'+unique_name+'.pth')
-
-        # Validation
-        if epoch % 1 == 0 or epoch==start_epoch:
-            model.eval()
-            val_loss = 0.0
+        try:
+            model.train()
+            train_loader.sampler.set_epoch(epoch)
+            total_loss = 0.0
             correct = 0
             total = 0
             total_iou = 0.0
-            with torch.no_grad():
-                pbar = tqdm(val_loader, desc=f"Validation", disable=rank != 0)
-                for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
-                    stitched = stitched.to(device)
-                    basemap = basemap.to(device)
-                    labels = labels.to(device)
-                    
-                    outputs = model(stitched, basemap)
-                    val_loss += criterion(outputs, labels).item()
-                    if rank == 0:
-                        pbar.set_postfix({'val_loss': val_loss / (pbar.n + 1)})
-                    # Calculate top-3 accuracy
-                    _, top3 = torch.topk(outputs, 3, dim=1)
-                    correct += (labels.gather(1, top3).sum(dim=1) > 0).sum().item()
-                    total += labels.size(0)
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", disable=rank != 0)
+            for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
+                stitched = stitched.to(device)
+                basemap = basemap.to(device)
+                labels = labels.to(device)
+                
+                optimizer.zero_grad()
+                # import pdb; pdb.set_trace()
 
-                    #Calculate IOU
-                    _, top9 = torch.topk(outputs, 9, dim=1)  # Shape: (B, 9)
-                    # Create binary predictions tensor based on top-9 indices
-                    predictions = torch.zeros_like(labels)
-                    predictions.scatter_(1, top9, 1)
+                outputs = model(stitched, basemap)
+                loss = criterion(outputs, labels)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item()
+                pbar.set_postfix({'loss': total_loss/(pbar.n+1)})
 
-                    # Calculate Intersection over Union (IoU)
-                    intersection = (predictions * labels).sum(dim=1)  # Element-wise multiplication and sum
-                    union = ((predictions + labels) > 0).sum(dim=1)  # Union is the count of non-zero elements
+                _, top3 = torch.topk(outputs, 3, dim=1)
+                correct += (labels.gather(1, top3).sum(dim=1) > 0).sum().item()
+                total += labels.size(0)
 
-                    # IoU as a percentage
-                    iou_percentage = (intersection / union * 100).mean().item()
-                    total_iou += iou_percentage
+                #Calculate IOU
+                _, top9 = torch.topk(outputs, 9, dim=1)  # Shape: (B, 9)
+                # Create binary predictions tensor based on top-9 indices
+                predictions = torch.zeros_like(labels)
+                predictions.scatter_(1, top9, 1)
+
+                # Calculate Intersection over Union (IoU)
+                intersection = (predictions * labels).sum(dim=1)  # Element-wise multiplication and sum
+                union = ((predictions + labels) > 0).sum(dim=1)  # Union is the count of non-zero elements
+
+                # IoU as a percentage
+                iou_percentage = (intersection / union * 100).mean().item()
+                total_iou += iou_percentage
             
-            val_loss /= len(val_loader)
-            val_acc = correct / total
-            val_iou = total_iou / len(val_loader)
-            losses["val"].append([epoch, val_loss, val_acc, val_iou])
-            
-            if rank == 0 and val_loss < best_val_loss:
-                best_val_loss = val_loss
+            train_loss = total_loss / len(train_loader)
+            train_acc = correct / total
+            train_iou = total_iou / len(train_loader)
+            losses["train"].append([epoch, train_loss, train_acc, train_iou])
+
+            if rank == 0:
+                if train_loss < best_train_loss:
+                    best_train_loss = train_loss
                 checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.module.state_dict(),
@@ -372,13 +406,70 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 'losses': losses,
                 'subset_indices': subset_indices  # Save the indices
                 }
-                torch.save(checkpoint, 'best_map_location_model_val_'+unique_name+'.pth')
-    
-        if rank == 0:
-            print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Top-3 Train Acc: {train_acc:.2%}, Val Loss: {val_loss:.4f}, Top-3 Val Acc: {val_acc:.2%}, Train IoU: {train_iou:.2f}, Val IoU: {val_iou:.2f}")
-            with open('loss_'+unique_name+'.json', 'a') as f:
-                json.dump(losses, f)
+                torch.save(checkpoint, 'latest_map_location_model_train_'+unique_name+'.pth')
 
+            # Validation
+            if epoch % 1 == 0 or epoch==start_epoch:
+                model.eval()
+                val_loss = 0.0
+                correct = 0
+                total = 0
+                total_iou = 0.0
+                with torch.no_grad():
+                    pbar = tqdm(val_loader, desc=f"Validation", disable=rank != 0)
+                    for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
+                        stitched = stitched.to(device)
+                        basemap = basemap.to(device)
+                        labels = labels.to(device)
+                        
+                        outputs = model(stitched, basemap)
+                        val_loss += criterion(outputs, labels).item()
+                        if rank == 0:
+                            pbar.set_postfix({'val_loss': val_loss / (pbar.n + 1)})
+                        # Calculate top-3 accuracy
+                        _, top3 = torch.topk(outputs, 3, dim=1)
+                        correct += (labels.gather(1, top3).sum(dim=1) > 0).sum().item()
+                        total += labels.size(0)
+
+                        #Calculate IOU
+                        _, top9 = torch.topk(outputs, 9, dim=1)  # Shape: (B, 9)
+                        # Create binary predictions tensor based on top-9 indices
+                        predictions = torch.zeros_like(labels)
+                        predictions.scatter_(1, top9, 1)
+
+                        # Calculate Intersection over Union (IoU)
+                        intersection = (predictions * labels).sum(dim=1)  # Element-wise multiplication and sum
+                        union = ((predictions + labels) > 0).sum(dim=1)  # Union is the count of non-zero elements
+
+                        # IoU as a percentage
+                        iou_percentage = (intersection / union * 100).mean().item()
+                        total_iou += iou_percentage
+                
+                val_loss /= len(val_loader)
+                val_acc = correct / total
+                val_iou = total_iou / len(val_loader)
+                losses["val"].append([epoch, val_loss, val_acc, val_iou])
+                
+                if rank == 0 and val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.module.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'losses': losses,
+                    'subset_indices': subset_indices  # Save the indices
+                    }
+                    torch.save(checkpoint, 'best_map_location_model_val_'+unique_name+'.pth')
+        
+            if rank == 0:
+                print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Top-3 Train Acc: {train_acc:.2%}, Val Loss: {val_loss:.4f}, Top-3 Val Acc: {val_acc:.2%}, Train IoU: {train_iou:.2f}, Val IoU: {val_iou:.2f}")
+                with open('loss_'+unique_name+'.json', 'a') as f:
+                    json.dump(losses, f)
+        except Exception as e:
+            print(e)
+        except KeyboardInterrupt:
+            print("Keyboard interrupt")
+            break
     cleanup()
 
 
@@ -410,7 +501,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0003)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_DiceLoss")
+    parser.add_argument('--version', type=str, default="8_BCELoss")
     args = parser.parse_args()
 
     # Data transforms

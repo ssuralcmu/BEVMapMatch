@@ -194,20 +194,21 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
     model = model.to(device)
     model = DDP(model, device_ids=[rank])
     
-    # pos_weight = torch.ones(100) * (91 / 9)  # Shape: (100,) and 9 positive out of 100
-    # pos_weight = pos_weight.to(device)
-    # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    pos_weight = torch.ones(100) * (91 / 9)  # Shape: (100,) and 9 positive out of 100
+    pos_weight = pos_weight.to(device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    
     scheduler=torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
     T_max=1000,  # Number of iterations for one annealing cycle
-    eta_min=1e-5 # Minimum learning rate
+    eta_min=3e-5 # Minimum learning rate
     )
 
-    criterion = DiceLoss(
-        mode="binary",        # Binary segmentation task
-        from_logits=True,     # Model outputs raw logits (before sigmoid)
-        smooth=1e-6,          # Small value to prevent division by zero
-        eps=1e-7              # Numerical stability
-    )
+    # criterion = DiceLoss(
+    #     mode="binary",        # Binary segmentation task
+    #     from_logits=True,     # Model outputs raw logits (before sigmoid)
+    #     smooth=1e-6,          # Small value to prevent division by zero
+    #     eps=1e-7              # Numerical stability
+    # )
     # criterion = FocalBCEWithLogitsLoss(alpha=1, gamma=0)
 
     #criterion = nn.BCEWithLogitsLoss()
