@@ -283,8 +283,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 outputs = model(stitched, basemap)
                 loss = criterion(outputs, labels) + criterion2(outputs, labels)
 
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 
                 total_loss += loss.item()

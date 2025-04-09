@@ -96,7 +96,7 @@ class MapDataset(Dataset):
 
 
 class GridClassifierWithRegression(nn.Module):
-    def __init__(self, dropout_rate=0.3, pretrained=True):
+    def __init__(self, dropout_rate=0.5, pretrained=True):
         super().__init__()
         
         # Feature extractor
@@ -130,7 +130,8 @@ class GridClassifierWithRegression(nn.Module):
             nn.Linear(256, 64),
             nn.ReLU(),
             nn.Dropout(p=dropout_rate),
-            nn.Linear(64, 2)  # (x, y) coordinates
+            nn.Linear(64, 2),  # (x, y) coordinates
+            nn.Tanh()
         )
 
     def create_local_mask(self):
@@ -164,9 +165,21 @@ class GridClassifierWithRegression(nn.Module):
         
         # Classification output
         grid_scores = self.fc(features)  # (B,100)
-        
-        # Regression output
-        coordinates = self.regression_head(features)  # (B,2)
+
+        # Get the indices of the highest scoring grid cells
+        _, max_indices = torch.max(grid_scores, dim=1)  # (B,)
+
+        grid_x = max_indices % 10
+        grid_y = max_indices // 10
+
+        offsets = self.regression_head(features)  # (B,2) in range [-1,1]
+
+        cell_centers = torch.stack([
+            (grid_x.float() + 0.5) / 10,  # Convert to [0.05 to 0.95] range
+            (grid_y.float() + 0.5) / 10   # (centers of cells)
+        ], dim=1)
+
+        coordinates = cell_centers + offsets * 0.1
         
         return grid_scores, coordinates
 
@@ -287,6 +300,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
             total = 0
             total_iou = 0.0
             total_coord_error = 0.0
+            train_total_top1_correct = 0
+            train_total_center_matches = 0
             
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", disable=rank != 0)
             for stitched, basemap, grid_labels, coord_labels, stitched_img_path, basemap_img_path, metas_path in pbar:
@@ -300,8 +315,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 grid_outputs, coord_outputs = model(stitched, basemap)
                 loss, grid_loss, coord_loss = criterion(grid_outputs, coord_outputs, grid_labels, coord_labels)
                 
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 
                 total_loss += loss.item()
@@ -318,6 +333,34 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 _, top3 = torch.topk(grid_outputs, 3, dim=1)
                 correct += (grid_labels.gather(1, top3).sum(dim=1) > 0).sum().item()
                 total += grid_labels.size(0)
+
+                _, top1 = torch.topk(grid_outputs, 1, dim=1)
+                train_top1_correct = (grid_labels.gather(1, top1) > 0).sum().item()
+                train_top1_accuracy = train_top1_correct / grid_labels.size(0)
+                train_total_top1_correct += train_top1_correct
+
+                #For the centermost point in grid cell of ones, find if it matches most likely
+                #It has to be the fifth non zero value
+                batch_size = grid_labels.size(0)
+                center_matches = 0
+                for i in range(batch_size):
+                    # Get indices where grid_labels is 1 for this sample
+                    ones_indices = torch.nonzero(grid_labels[i]).squeeze()
+                    
+                    # Check if there are at least 5 ones
+                    if ones_indices.numel() >= 5:
+                        # Get the 5th one (index 4 in 0-indexed system)
+                        fifth_one_index = ones_indices[4]
+                        
+                        # Get the top prediction for this sample
+                        top_pred_index = top1[i].item()
+                        
+                        # Check if they match
+                        if top_pred_index == fifth_one_index:
+                            center_matches += 1
+                
+                train_total_center_matches += center_matches
+
 
                 # Grid IoU metrics
                 _, top9 = torch.topk(grid_outputs, 9, dim=1)
@@ -338,8 +381,11 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
             train_acc = correct / total
             train_iou = total_iou / len(train_loader)
             train_coord_error = total_coord_error / len(train_loader)
+            train_top1_accuracy = train_total_top1_correct / total
+            train_center_matches_percent = train_total_center_matches * 100 / total
+
             
-            losses["train"].append([epoch, train_loss, train_acc, train_iou, train_grid_loss, train_coord_loss, train_coord_error])
+            losses["train"].append([epoch, train_loss, train_acc, train_iou, train_grid_loss, train_coord_loss, train_coord_error, train_top1_accuracy, train_center_matches_percent])
 
             if rank == 0:
                 if train_loss < best_train_loss:
@@ -363,7 +409,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 total = 0
                 total_iou = 0.0
                 total_coord_error = 0.0
-                
+                val_total_top1_correct = 0
+                val_total_center_matches = 0
                 with torch.no_grad():
                     pbar = tqdm(val_loader, desc=f"Validation", disable=rank != 0)
                     for stitched, basemap, grid_labels, coord_labels, stitched_img_path, basemap_img_path, metas_path in pbar:
@@ -391,6 +438,30 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                         correct += (grid_labels.gather(1, top3).sum(dim=1) > 0).sum().item()
                         total += grid_labels.size(0)
 
+                        _, top1 = torch.topk(grid_outputs, 1, dim=1)
+                        top1_correct = (grid_labels.gather(1, top1) > 0).sum().item()
+                        val_total_top1_correct += top1_correct
+
+                        batch_size = grid_labels.size(0)
+                        center_matches = 0
+                        for i in range(batch_size):
+                            # Get indices where grid_labels is 1 for this sample
+                            ones_indices = torch.nonzero(grid_labels[i]).squeeze()
+                            
+                            # Check if there are at least 5 ones
+                            if ones_indices.numel() >= 5:
+                                # Get the 5th one (index 4 in 0-indexed system)
+                                fifth_one_index = ones_indices[4]
+                                
+                                # Get the top prediction for this sample
+                                top_pred_index = top1[i].item()
+                                
+                                # Check if they match
+                                if top_pred_index == fifth_one_index:
+                                    center_matches += 1
+                        
+                        val_total_center_matches += center_matches
+
                         # Grid IoU metrics
                         _, top9 = torch.topk(grid_outputs, 9, dim=1)
                         predictions = torch.zeros_like(grid_labels)
@@ -410,8 +481,10 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 val_acc = correct / total
                 val_iou = total_iou / len(val_loader)
                 val_coord_error = total_coord_error / len(val_loader)
+                val_top1_accuracy = val_total_top1_correct / total
+                val_center_matches_percent = val_total_center_matches * 100 / total
                 
-                losses["val"].append([epoch, val_loss, val_acc, val_iou, val_grid_loss, val_coord_loss, val_coord_error])
+                losses["val"].append([epoch, val_loss, val_acc, val_iou, val_grid_loss, val_coord_loss, val_coord_error, val_top1_accuracy, val_center_matches_percent])
                 
                 if rank == 0 and val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -426,8 +499,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
         
             if rank == 0:
                 print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Grid Loss: {train_grid_loss:.4f}, Coord Loss: {train_coord_loss:.4f}, "
-                      f"Train Acc: {train_acc:.2%}, Train IoU: {train_iou:.2f}, Coord Error: {train_coord_error:.4f}, "
-                      f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2%}, Val IoU: {val_iou:.2f}, Val Coord Error: {val_coord_error:.4f}")
+          f"Train Top-3 Acc: {train_acc:.2%}, Train Top-1 Acc: {train_top1_accuracy:.2%}, Train IoU: {train_iou:.2f}, Train Coord Error: {train_coord_error:.4f}, Train Center Matches: {train_center_matches_percent:.2f}%, "
+          f"Val Loss: {val_loss:.4f}, Val Top-3 Acc: {val_acc:.2%}, Val Top-1 Acc: {val_top1_accuracy:.2%}, Val IoU: {val_iou:.2f}, Val Coord Error: {val_coord_error:.4f}, Val Center Matches: {val_center_matches_percent:.2f}%")
                 
                 with open(f'loss_{unique_name}.json', 'w') as f:
                     json.dump(losses, f)
