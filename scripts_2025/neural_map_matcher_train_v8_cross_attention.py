@@ -285,15 +285,15 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
     # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
 
-    # criterion = DiceLoss(
-    #     mode="binary",        # Binary segmentation task
-    #     from_logits=True,     # Model outputs raw logits (before sigmoid)
-    #     smooth=1e-6,          # Small value to prevent division by zero
-    #     eps=1e-7              # Numerical stability
-    # )
+    criterion = DiceLoss(
+        mode="binary",        # Binary segmentation task
+        from_logits=True,     # Model outputs raw logits (before sigmoid)
+        smooth=1e-6,          # Small value to prevent division by zero
+        eps=1e-7              # Numerical stability
+    )
     # criterion = FocalBCEWithLogitsLoss(alpha=1, gamma=0)
 
-    criterion = nn.BCEWithLogitsLoss()
+    # criterion = nn.BCEWithLogitsLoss()
     # criterion = FocalLoss(alpha=0.9, gamma=2)
     # criterion = lambda inputs, targets: sigmoid_focal_loss(
     #     inputs, targets, alpha=0.9, gamma=2.5, reduction="mean"
@@ -367,7 +367,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 outputs = model(stitched, basemap)
                 loss = criterion(outputs, labels)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 
                 total_loss += loss.item()
@@ -501,7 +501,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0003)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_BCELoss")
+    parser.add_argument('--version', type=str, default="8_DiceLoss")
     args = parser.parse_args()
 
     # Data transforms

@@ -1,2 +1,2 @@
-python neural_map_matcher_train_v10_cross_attention_two_losses.py --lr 0.0003 --version "10_BCE_Dice" --num_epochs 30
-python neural_map_matcher_train_v8_cross_attention.py --lr 0.0003 --version "8_BCELoss_Drop_BN" --num_epochs 30
+python neural_map_matcher_train_v8_cross_attention.py --version "8_BCELoss_GradClip" --checkpoint latest_map_location_model_train_grid_v8_BCELoss_GradClip-lr0.0003-bs64-frac1.0-seed42.pth 
+python neural_map_matcher_train_v14_global_pooling.py
