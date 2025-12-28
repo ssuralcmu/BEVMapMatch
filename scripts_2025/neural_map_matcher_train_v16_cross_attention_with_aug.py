@@ -18,6 +18,91 @@ import argparse
 from torchvision.ops import sigmoid_focal_loss
 from segmentation_models_pytorch.losses import DiceLoss
 
+from PIL import Image
+import numpy as np
+import os
+import torch
+from torch.utils.data import Dataset
+
+class AugmentedMapDataset(Dataset):
+    def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
+        self.basemap_folder = basemap_folder
+        self.stitched_folder = stitched_folder
+        self.metas_folder = metas_folder
+        self.transform_base = transform_base
+        self.transform_gen = transform_gen
+        
+        stitched_files = os.listdir(stitched_folder)
+        self.file_triplets = []
+        for stitched_file in stitched_files:
+            if stitched_file.endswith("_generated_map_image.png"):
+                prefix = stitched_file.split("_generated_map_image.png")[0]
+                basemap_file = f"{prefix}_base_map_image.png"
+                metas_file = f"{prefix}_metas.npy"
+                if os.path.exists(os.path.join(basemap_folder, basemap_file)) and os.path.exists(os.path.join(metas_folder, metas_file)):
+                    self.file_triplets.append((stitched_file, basemap_file, metas_file))
+
+    def __len__(self):
+        # Multiply by 4 to account for original + 3 rotations
+        return len(self.file_triplets) * 4
+
+    def __getitem__(self, idx):
+        # Determine which augmentation to apply based on the index
+        original_idx = idx // 4
+        rotation_idx = idx % 4
+
+        stitched_file, basemap_file, metas_file = self.file_triplets[original_idx]
+        
+        stitched_img_path = os.path.join(self.stitched_folder, stitched_file)
+        basemap_img_path = os.path.join(self.basemap_folder, basemap_file)
+        metas_path = os.path.join(self.metas_folder, metas_file)
+
+        # Load images and metadata
+        stitched_img = Image.open(stitched_img_path).convert('RGB')
+        basemap_img = Image.open(basemap_img_path).convert('RGB')
+        
+        basemap_img = np.array(basemap_img)
+        basemap_img = np.flipud(basemap_img)
+        basemap_img = Image.fromarray(basemap_img)
+        
+        # Rotate the stitched image based on rotation_idx
+        if rotation_idx == 1:
+            stitched_img = stitched_img.rotate(90)
+        elif rotation_idx == 2:
+            stitched_img = stitched_img.rotate(180)
+        elif rotation_idx == 3:
+            stitched_img = stitched_img.rotate(270)
+
+        # Apply transformations if provided
+        if self.transform_gen:
+            stitched_img = self.transform_gen(stitched_img)
+        if self.transform_base:
+            basemap_img = self.transform_base(basemap_img)
+
+        # Load metadata and process grid labels (unchanged)
+        metas = np.load(metas_path, allow_pickle=True).item()
+        
+        center_x, center_y = basemap_img.shape[1] // 2, basemap_img.shape[2] // 2
+        x_val = center_x - metas['perturbation'][0]
+        y_val = center_y - metas['perturbation'][1]
+        
+        grid_size = 100  # Each grid is 100x100 pixels
+        grid_x = int(x_val // grid_size)
+        grid_y = int(y_val // grid_size)
+        
+        grid_label = torch.zeros(10, 10)
+        
+        min_i = max(0, grid_x - 1)
+        max_i = min(9, grid_x + 2)
+        min_j = max(0, grid_y - 1)
+        max_j = min(9, grid_y + 2)
+        
+        for i in range(min_i, max_i):
+            for j in range(min_j, max_j):
+                grid_label[i, j] = 1
+
+        return stitched_img, basemap_img, grid_label.flatten().float(), stitched_img_path, basemap_img_path, metas_path
+
 class MapDataset(Dataset):
     def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
         self.basemap_folder = basemap_folder
@@ -81,22 +166,20 @@ class MapDataset(Dataset):
             # we need to find the grid cell it falls into and mark that cell and its surrounding cells.
             # This will create a 3x3 area around the grid cell that contains the center. 
             # This is the only way to have a unique label for each grid cell and its surrounding cells.
-            # min_i = max(0, grid_x - 1)
-            # max_i = min(9, grid_x + 2)
-            # min_j = max(0, grid_y - 1)
-            # max_j = min(9, grid_y + 2)
+            min_i = max(0, grid_x - 1)
+            max_i = min(9, grid_x + 2)
+            min_j = max(0, grid_y - 1)
+            max_j = min(9, grid_y + 2)
             
-            # for i in range(min_i, max_i):
-            #     for j in range(min_j, max_j):
-            #         grid_label[i, j] = 1
-
-            # Mark the grid cell and its surrounding cells
-            grid_label[grid_x, grid_y] = 1
-
+            for i in range(min_i, max_i):
+                for j in range(min_j, max_j):
+                    grid_label[i, j] = 1
+            
             return stitched_img, basemap_img, grid_label.flatten().float(), stitched_img_path, basemap_img_path, metas_path
             
         except Exception as e:
             return torch.zeros(3, 100, 100), torch.zeros(3, 1000, 1000), torch.zeros(100), "", "", ""
+
 
 class GridClassifier(nn.Module):
     def __init__(self):
@@ -177,7 +260,7 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def create_dataloader(rank, world_size, dataset, batch_size=16, num_workers=10):
+def create_dataloader(rank, world_size, dataset, batch_size=16, num_workers=8):
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler, 
                      num_workers=num_workers, pin_memory=True)
@@ -272,8 +355,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
             train_loader.sampler.set_epoch(epoch)
             total_loss = 0.0
             correct = 0
-            top1_correct = 0
             total = 0
+            total_iou = 0.0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", disable=rank != 0)
             for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
                 stitched = stitched.to(device)
@@ -296,19 +379,24 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 correct += (labels.gather(1, top3).sum(dim=1) > 0).sum().item()
                 total += labels.size(0)
 
-                #Calculate accuracy of matching the top-most cell
-                # Find the 1x1 cell with highest score
-                _, top1 = torch.topk(outputs, 1, dim=1)
-                # Create binary predictions tensor based on top-1 index
+                #Calculate IOU
+                _, top9 = torch.topk(outputs, 9, dim=1)  # Shape: (B, 9)
+                # Create binary predictions tensor based on top-9 indices
                 predictions = torch.zeros_like(labels)
-                predictions.scatter_(1, top1, 1)
-                # Calculate top-1 accuracy
-                top1_correct += (predictions * labels).sum().item()
+                predictions.scatter_(1, top9, 1)
+
+                # Calculate Intersection over Union (IoU)
+                intersection = (predictions * labels).sum(dim=1)  # Element-wise multiplication and sum
+                union = ((predictions + labels) > 0).sum(dim=1)  # Union is the count of non-zero elements
+
+                # IoU as a percentage
+                iou_percentage = (intersection / union * 100).mean().item()
+                total_iou += iou_percentage
             
             train_loss = total_loss / len(train_loader)
             train_acc = correct / total
-            train_top1_acc = top1_correct / total
-            losses["train"].append([epoch, train_loss, train_acc, train_top1_acc])
+            train_iou = total_iou / len(train_loader)
+            losses["train"].append([epoch, train_loss, train_acc, train_iou])
 
             if rank == 0:
                 if train_loss < best_train_loss:
@@ -327,8 +415,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 model.eval()
                 val_loss = 0.0
                 correct = 0
-                val_top1_correct = 0
                 total = 0
+                total_iou = 0.0
                 with torch.no_grad():
                     pbar = tqdm(val_loader, desc=f"Validation", disable=rank != 0)
                     for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
@@ -344,19 +432,25 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                         _, top3 = torch.topk(outputs, 3, dim=1)
                         correct += (labels.gather(1, top3).sum(dim=1) > 0).sum().item()
                         total += labels.size(0)
-                        # Calculate top-1 accuracy
-                        _, top1 = torch.topk(outputs, 1, dim=1)
-                        # Create binary predictions tensor based on top-1 index
-                        predictions = torch.zeros_like(labels)
-                        predictions.scatter_(1, top1, 1)
-                        # Calculate top-1 accuracy
-                        val_top1_correct += (predictions * labels).sum().item()
 
+                        #Calculate IOU
+                        _, top9 = torch.topk(outputs, 9, dim=1)  # Shape: (B, 9)
+                        # Create binary predictions tensor based on top-9 indices
+                        predictions = torch.zeros_like(labels)
+                        predictions.scatter_(1, top9, 1)
+
+                        # Calculate Intersection over Union (IoU)
+                        intersection = (predictions * labels).sum(dim=1)  # Element-wise multiplication and sum
+                        union = ((predictions + labels) > 0).sum(dim=1)  # Union is the count of non-zero elements
+
+                        # IoU as a percentage
+                        iou_percentage = (intersection / union * 100).mean().item()
+                        total_iou += iou_percentage
                 
                 val_loss /= len(val_loader)
                 val_acc = correct / total
-                val_top1_acc = val_top1_correct / total
-                losses["val"].append([epoch, val_loss, val_acc, val_top1_acc])
+                val_iou = total_iou / len(val_loader)
+                losses["val"].append([epoch, val_loss, val_acc, val_iou])
                 
                 if rank == 0 and val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -370,8 +464,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                     torch.save(checkpoint, 'best_map_location_model_val_'+unique_name+'.pth')
         
             if rank == 0:
-                print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Top-3 Train Acc: {train_acc:.2%}, Val Loss: {val_loss:.4f}, Top-3 Val Acc: {val_acc:.2%}, Train Top-1 Acc: {train_top1_acc:.2%}, Val Top-1 Acc: {val_top1_acc:.2%}")
-                with open('loss_'+unique_name+'.json', 'w') as f:
+                print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Top-3 Train Acc: {train_acc:.2%}, Val Loss: {val_loss:.4f}, Top-3 Val Acc: {val_acc:.2%}, Train IoU: {train_iou:.2f}, Val IoU: {val_iou:.2f}")
+                with open('loss_'+unique_name+'.json', 'a') as f:
                     json.dump(losses, f)
         except Exception as e:
             print(e)
@@ -409,7 +503,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0003)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="13_BCELoss")
+    parser.add_argument('--version', type=str, default="16_BCELoss_with_aug")
     args = parser.parse_args()
 
     # Data transforms
@@ -426,7 +520,7 @@ def main():
 
     # Datasets
     base_folder = "/data1/"
-    train_dataset = MapDataset(
+    train_dataset = AugmentedMapDataset(
         base_folder+'all_train_metas_v2',
         base_folder+'all_train_basemaps_v2',
         base_folder+'all_train_maps_gt_v2/map/',
@@ -459,5 +553,11 @@ def main():
         nprocs=world_size,
         join=True
     )
+    # For single GPU testing
+    # rank = 1
+    # train_model(rank, world_size, args.num_epochs, model, criterion, optimizer,
+    #            train_dataset, val_dataset, args.batch_size, args.lr,
+    #            args.version, args.train_fraction, args.checkpoint, args.seed)
+
 if __name__ == '__main__':
     main()

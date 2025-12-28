@@ -1,2 +1,2 @@
-python neural_map_matcher_train_v8_cross_attention.py --version "8_BCELoss_GradClip" --checkpoint latest_map_location_model_train_grid_v8_BCELoss_GradClip-lr0.0003-bs64-frac1.0-seed42.pth 
-python neural_map_matcher_train_v14_global_pooling.py
+python neural_map_matcher_train_v18_cross_attn_grid_mse.py --num_epochs 12 --lr 0.0003
+python neural_map_matcher_train_v18_cross_attn_grid_mse.py --lr 0.00003

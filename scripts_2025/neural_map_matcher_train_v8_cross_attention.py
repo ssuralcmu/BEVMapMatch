@@ -65,6 +65,8 @@ class MapDataset(Dataset):
             
             # Convert coordinates to grid labels
             center_x, center_y = basemap_img.shape[1] // 2, basemap_img.shape[2] // 2
+            # print("center_x: ", center_x)
+            # print("center_y: ", center_y)
             x_val = center_x - metas['perturbation'][0]
             y_val = center_y - metas['perturbation'][1]
             
@@ -92,92 +94,6 @@ class MapDataset(Dataset):
             
         except Exception as e:
             return torch.zeros(3, 100, 100), torch.zeros(3, 1000, 1000), torch.zeros(100), "", "", ""
-
-class GridClassifier_WithDropBN(nn.Module):
-    def __init__(self, dropout_rate=0.3):
-        super().__init__()
-        
-        # Feature extractor
-        resnet = models.resnet18(pretrained=True)
-        self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
-        
-        # Batch normalization after feature extraction
-        self.bn1 = nn.BatchNorm2d(512)
-        
-        # Dropout after feature extraction
-        self.dropout1 = nn.Dropout(p=dropout_rate)
-        
-        # 3x3 processing
-        self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))
-        
-        # Batch normalization after grid pooling
-        self.bn2 = nn.BatchNorm2d(512)
-        
-        # Cross-attention with local constraints
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=512, 
-            num_heads=8,
-            batch_first=True,
-            dropout=dropout_rate  # Add dropout within attention
-        )
-        
-        # Positional encoding
-        self.pos_embed = nn.Parameter(torch.randn(100, 512)*0.02)
-        
-        # 3x3 attention mask
-        self.register_buffer('attn_mask', self.create_local_mask())
-        
-        # Dropout before final classification
-        self.dropout2 = nn.Dropout(p=dropout_rate)
-        
-        # Batch normalization before final classification
-        self.bn3 = nn.BatchNorm1d(512)
-        
-        self.fc = nn.Linear(512, 100)
-
-    def create_local_mask(self):
-        """Create (1, 100) mask allowing queries to see all 3x3 regions"""
-        # Allow full attention since we pre-processed 3x3 context
-        return torch.zeros(1, 100, dtype=torch.bool)  # No masking
-
-    def forward(self, stitched, basemap):
-        # Feature extraction with batch norm and dropout
-        stitched_feat = self.feature_extractor(stitched)  # (B,512,7,7)
-        stitched_feat = self.bn1(stitched_feat)
-        stitched_feat = self.dropout1(stitched_feat)
-        
-        basemap_feat = self.feature_extractor(basemap)    # (B,512,25,25)
-        basemap_feat = self.bn1(basemap_feat)
-        basemap_feat = self.dropout1(basemap_feat)
-        
-        # Process basemap to 10x10 grid with 3x3 context
-        grid = self.grid_pool(basemap_feat)  # (B,512,10,10)
-        grid = self.bn2(grid)
-        
-        grid_3x3 = F.unfold(grid, kernel_size=3, padding=1)  # (B,512*9,100)
-        grid_3x3 = grid_3x3.view(-1, 512, 9, 100).mean(dim=2)  # (B,512,100)
-        
-        # Prepare attention inputs
-        query = F.adaptive_avg_pool2d(stitched_feat, (1,1)).flatten(1)  # (B,512)
-        key = value = grid_3x3.permute(0,2,1) + self.pos_embed  # (B,100,512)
-        
-        # Cross-attention with corrected mask
-        scores, _ = self.cross_attn(
-            query=query.unsqueeze(1),  # (B,1,512)
-            key=key,                   # (B,100,512)
-            value=value,               # (B,100,512)
-            attn_mask=self.attn_mask   # (1,100)
-        )
-        
-        # Apply batch norm and dropout before final classification
-        scores = scores.squeeze(1)  # (B,512)
-        scores = self.bn3(scores)
-        scores = self.dropout2(scores)
-        
-        scores = self.fc(scores)
-        
-        return scores  # (B,100)
-
 
 class GridClassifier(nn.Module):
     def __init__(self):
@@ -252,7 +168,7 @@ class FocalLoss(nn.Module):
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12738'
+    os.environ['MASTER_PORT'] = '17733'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -285,15 +201,15 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
     # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
 
-    criterion = DiceLoss(
-        mode="binary",        # Binary segmentation task
-        from_logits=True,     # Model outputs raw logits (before sigmoid)
-        smooth=1e-6,          # Small value to prevent division by zero
-        eps=1e-7              # Numerical stability
-    )
+    # criterion = DiceLoss(
+    #     mode="binary",        # Binary segmentation task
+    #     from_logits=True,     # Model outputs raw logits (before sigmoid)
+    #     smooth=1e-6,          # Small value to prevent division by zero
+    #     eps=1e-7              # Numerical stability
+    # )
     # criterion = FocalBCEWithLogitsLoss(alpha=1, gamma=0)
 
-    # criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCEWithLogitsLoss()
     # criterion = FocalLoss(alpha=0.9, gamma=2)
     # criterion = lambda inputs, targets: sigmoid_focal_loss(
     #     inputs, targets, alpha=0.9, gamma=2.5, reduction="mean"
@@ -501,7 +417,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0003)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_DiceLoss")
+    parser.add_argument('--version', type=str, default="8_BCELoss_retrain")
     args = parser.parse_args()
 
     # Data transforms

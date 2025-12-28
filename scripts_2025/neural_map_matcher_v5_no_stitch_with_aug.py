@@ -67,7 +67,7 @@ class MapDataset(Dataset):
             if self.augment and idx >= len(self.original_triplets):
                 # Random rotation (-25° to +25°)
                 angle = random.choice(range(-180, 181, 45))
-                stitched_img = stitched_img.rotate(angle, expand=True)
+                tmustitched_img = stitched_img.rotate(angle, expand=True)
                 
                 # Random scaling (85%-115%)
                 scale = random.uniform(0.85, 1.15)

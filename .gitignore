@@ -30,3 +30,7 @@ make_video.zip
 /scripts_2025/v2_v3_models/*
 
 *.png
+
+scripts_2025/v4_v11_models_results/*
+
+scripts_2025/analysis/results/*
