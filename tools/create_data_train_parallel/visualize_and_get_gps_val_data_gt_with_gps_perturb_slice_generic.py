@@ -38,44 +38,38 @@ def recursive_eval(obj, globals=None):
 
     return obj
 
-def render_map_patch_to_array(nusc_map, *args, dpi=200, **kwargs):
-    """
-    Wrapper function to convert render_map_patch output to numpy array.
-    
-    :param nusc_map: NuScenesMap object
-    :param args: Positional arguments to pass to render_map_patch
-    :param kwargs: Keyword arguments to pass to render_map_patch
-    :return: Numpy array of the rendered map patch
-    """
-    # Call the original render_map_patch method
-    fig, ax = nusc_map.render_map_patch(*args, **kwargs)
+def build_segmentation_basemap(nusc_map, center_xy, patch_size, classes):
+    mappings = {}
+    for name in classes:
+        if name == "drivable_area*":
+            mappings[name] = ["road_segment", "lane"]
+        elif name == "divider":
+            mappings[name] = ["road_divider", "lane_divider"]
+        else:
+            mappings[name] = [name]
 
-    bbox_coords = kwargs.get('box_coords')
-    ax.set_xlim(bbox_coords[0], bbox_coords[2])
-    ax.set_ylim(bbox_coords[1], bbox_coords[3])
+    layer_names = []
+    for name in mappings:
+        layer_names.extend(mappings[name])
+    layer_names = list(set(layer_names))
 
-    # Remove axis ticks and labels
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_frame_on(False)
-    ax.axis('off')
+    canvas_size = (patch_size * 4, patch_size * 4)
+    patch_box = (center_xy[0], center_xy[1], patch_size * 2, patch_size * 2)
+    masks = nusc_map.get_map_mask(
+        patch_box=patch_box,
+        patch_angle=0.0,
+        layer_names=layer_names,
+        canvas_size=canvas_size,
+    )
+    masks = masks.transpose(0, 2, 1)
+    masks = masks.astype(np.bool)
 
-    fig.set_dpi(dpi)
-    
-    # Save the figure to a buffer
-    buf = io.BytesIO()
-    canvas = FigureCanvasAgg(fig)
-    canvas.print_png(buf)
-    
-    # Close the figure to free up memory
-    fig.clf()
-
-    plt.close(fig)
-    
-    # Convert buffer to numpy array
-    buf.seek(0)
-    img = Image.open(buf)
-    return np.array(img)
+    labels = np.zeros((len(classes), *canvas_size), dtype=np.bool)
+    for k, name in enumerate(classes):
+        for layer_name in mappings[name]:
+            index = layer_names.index(layer_name)
+            labels[k, masks[index]] = 1
+    return labels
 
 def main() -> None:
     dist.init()
@@ -104,7 +98,7 @@ def main() -> None:
     torch.cuda.set_device(dist.local_rank())
 
     # build the dataloader
-    dataset = build_dataset(cfg.data["val"])
+    dataset = build_dataset(cfg.data[args.split])
     
     from torch.utils.data import Subset
     start=args.start_idx
@@ -146,8 +140,8 @@ def main() -> None:
 
             name = "{}-{}".format(metas["timestamp"], metas["token"])
 
-            save_path = 'all_val_basemaps_v2_500m/'+name+"_base_map_image.png"  # Change this to your desired save location
-            metas_save_path = 'all_val_metas_v2_500m/'+name+"_metas.npy"  # Change this to your desired save
+            save_path = 'all_val_basemaps_segmented_v3/'+name+"_base_map_image.png"  # Change this to your desired save location
+            metas_save_path = 'all_val_metas_v3/'+name+"_metas.npy"  # Change this to your desired save
             #Make directory if it does not exist
             # os.makedirs(os.path.dirname(save_path), exist_ok=True)
             #Check if file already exists
@@ -207,32 +201,24 @@ def main() -> None:
             metas['perturbation'] = perturbation
             metas['new_global_xyz'] = global_xyz
 
-            dpi = 200  # Set an appropriate DPI value
-            #figsize = (2*2*patch_size/dpi, 2*2*patch_size/dpi)  # Calculate figsize in inches
-            figsize = (2*2*patch_size/dpi, 2*2*patch_size/dpi)  # Calculate figsize in inches
-
-            # Render the map and get figure, axis
-            map_array = render_map_patch_to_array(nusc_map,
-                box_coords=[global_xyz[0]-patch_size, global_xyz[1]-patch_size, global_xyz[0]+patch_size, global_xyz[1]+patch_size],  # [x_min, y_min, x_max, y_max]
-                figsize=figsize,
-                layer_names=['drivable_area', 'ped_crossing', 'walkway', 'stop_line', 'carpark_area', 'lane', 'road_segment', 'road_block'],
-                render_egoposes_range = False,
-                render_legend = False,
-                alpha=0.5,
-                dpi=dpi
+            map_masks = build_segmentation_basemap(
+                nusc_map,
+                (global_xyz[0], global_xyz[1]),
+                patch_size,
+                cfg.map_classes,
             )
-            # print("Saving map figure...")
-
-            # Save the figure
 
 
-            image = Image.fromarray(map_array)
 
             # Save the image to a file
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            image.save(save_path)
-            # print(f"Map image saved at: {save_path}")
 
+            visualize_map(
+                save_path,
+                map_masks,
+                classes=cfg.map_classes,
+            )
+            
             plt.close('all')
             
             #Save metas variable to file

@@ -15,10 +15,10 @@
 */*.pyc
 
 /all_*/
+make_video.zip
 
 /scripts_2025/__pycache__/*
 /scripts_2025/evaluation_results/*
-make_video.zip
 /scripts_2025/*.pth
 
 /scripts_2025/eval_results*
@@ -34,3 +34,5 @@ make_video.zip
 scripts_2025/v4_v11_models_results/*
 
 scripts_2025/analysis/results/*
+
+/scripts_2026/*.pth
