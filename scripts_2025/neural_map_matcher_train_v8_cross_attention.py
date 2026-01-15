@@ -16,7 +16,7 @@ import torch.multiprocessing as mp
 import json
 import argparse
 from torchvision.ops import sigmoid_focal_loss
-from segmentation_models_pytorch.losses import DiceLoss
+# from segmentation_models_pytorch.losses import DiceLoss
 
 class MapDataset(Dataset):
     def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
@@ -413,7 +413,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--train_fraction', type=float, default=1.0)
-    parser.add_argument('--num_epochs', type=int, default=500)
+    parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0003)
     parser.add_argument('--seed', type=int, default=42)
