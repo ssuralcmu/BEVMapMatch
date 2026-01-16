@@ -415,9 +415,9 @@ def main():
     parser.add_argument('--train_fraction', type=float, default=1.0)
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--lr', type=float, default=0.0003)
+    parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_BCELoss_retrain")
+    parser.add_argument('--version', type=str, default="8_BCELoss")
     args = parser.parse_args()
 
     # Data transforms
@@ -437,13 +437,13 @@ def main():
     train_dataset = MapDataset(
         base_folder+'all_train_metas_v3',
         base_folder+'all_train_basemaps_segmented_v3',
-        base_folder+'all_train_maps_gt_v3/map/',
+        base_folder+'all_train_maps_segmented_gt_v3/map/',
         transform_base, transform_gen
     )
     val_dataset = MapDataset(
         base_folder+'all_val_metas_v3',
         base_folder+'all_val_basemaps_segmented_v3', 
-        base_folder+'all_val_maps_gt_v3/map/',
+        base_folder+'all_val_maps_segmented_gt_v3/map/',
         transform_base, transform_gen
     )
 
