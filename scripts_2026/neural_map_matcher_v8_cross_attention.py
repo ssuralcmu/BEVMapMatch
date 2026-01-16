@@ -18,6 +18,10 @@ import argparse
 from torchvision.ops import sigmoid_focal_loss
 # from segmentation_models_pytorch.losses import DiceLoss
 
+from pathlib import Path
+import matplotlib.pyplot as plt
+
+
 class MapDataset(Dataset):
     def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
         self.basemap_folder = basemap_folder
@@ -41,59 +45,59 @@ class MapDataset(Dataset):
         return len(self.file_triplets)
 
     def __getitem__(self, idx):
-        try:
-            # import pdb; pdb.set_trace()
-            stitched_file, basemap_file, metas_file = self.file_triplets[idx]
-            
-            stitched_img_path = os.path.join(self.stitched_folder, stitched_file)
-            basemap_img_path = os.path.join(self.basemap_folder, basemap_file)
-            metas_path = os.path.join(self.metas_folder, metas_file)
-
-            stitched_img = Image.open(stitched_img_path).convert('RGB')
-            basemap_img = Image.open(basemap_img_path).convert('RGB')
+        # try:
+        # import pdb; pdb.set_trace()
+        stitched_file, basemap_file, metas_file = self.file_triplets[idx]
         
-            basemap_img = np.array(basemap_img)
-            basemap_img = np.flipud(basemap_img)
-            basemap_img = Image.fromarray(basemap_img)
+        stitched_img_path = os.path.join(self.stitched_folder, stitched_file)
+        basemap_img_path = os.path.join(self.basemap_folder, basemap_file)
+        metas_path = os.path.join(self.metas_folder, metas_file)
 
-            if self.transform_gen:
-                stitched_img = self.transform_gen(stitched_img)
-            if self.transform_base:
-                basemap_img = self.transform_base(basemap_img)
+        stitched_img = Image.open(stitched_img_path).convert('RGB')
+        basemap_img = Image.open(basemap_img_path).convert('RGB')
+    
+        basemap_img = np.array(basemap_img)
+        basemap_img = np.flipud(basemap_img)
+        basemap_img = Image.fromarray(basemap_img)
 
-            metas = np.load(metas_path, allow_pickle=True).item()
+        if self.transform_gen:
+            stitched_img = self.transform_gen(stitched_img)
+        if self.transform_base:
+            basemap_img = self.transform_base(basemap_img)
+
+        metas = np.load(metas_path, allow_pickle=True).item()
+        
+        # Convert coordinates to grid labels
+        center_x, center_y = basemap_img.shape[1] // 2, basemap_img.shape[2] // 2
+        # print("center_x: ", center_x)
+        # print("center_y: ", center_y)
+        x_val = center_x - metas['perturbation'][0]
+        y_val = center_y - metas['perturbation'][1]
+        
+        grid_size = 100  # Each grid is 100x100 pixels
+        grid_x = int(x_val // grid_size)
+        grid_y = int(y_val // grid_size)
+        
+        # Create 10x10 grid mask for multi-label classification
+        grid_label = torch.zeros(10, 10)
+        
+        # Mark overlapping 2x2 grids. So basically if the center of the map is at (x_val, y_val),
+        # we need to find the grid cell it falls into and mark that cell and its surrounding cells.
+        # This will create a 3x3 area around the grid cell that contains the center. 
+        # This is the only way to have a unique label for each grid cell and its surrounding cells.
+        min_i = max(0, grid_x - 1)
+        max_i = min(9, grid_x + 2)
+        min_j = max(0, grid_y - 1)
+        max_j = min(9, grid_y + 2)
+        
+        for i in range(min_i, max_i):
+            for j in range(min_j, max_j):
+                grid_label[i, j] = 1
+        
+        return stitched_img, basemap_img, grid_label.flatten().float(), stitched_img_path, basemap_img_path, metas_path
             
-            # Convert coordinates to grid labels
-            center_x, center_y = basemap_img.shape[1] // 2, basemap_img.shape[2] // 2
-            # print("center_x: ", center_x)
-            # print("center_y: ", center_y)
-            x_val = center_x - metas['perturbation'][0]
-            y_val = center_y - metas['perturbation'][1]
-            
-            grid_size = 100  # Each grid is 100x100 pixels
-            grid_x = int(x_val // grid_size)
-            grid_y = int(y_val // grid_size)
-            
-            # Create 10x10 grid mask for multi-label classification
-            grid_label = torch.zeros(10, 10)
-            
-            # Mark overlapping 2x2 grids. So basically if the center of the map is at (x_val, y_val),
-            # we need to find the grid cell it falls into and mark that cell and its surrounding cells.
-            # This will create a 3x3 area around the grid cell that contains the center. 
-            # This is the only way to have a unique label for each grid cell and its surrounding cells.
-            min_i = max(0, grid_x - 1)
-            max_i = min(9, grid_x + 2)
-            min_j = max(0, grid_y - 1)
-            max_j = min(9, grid_y + 2)
-            
-            for i in range(min_i, max_i):
-                for j in range(min_j, max_j):
-                    grid_label[i, j] = 1
-            
-            return stitched_img, basemap_img, grid_label.flatten().float(), stitched_img_path, basemap_img_path, metas_path
-            
-        except Exception as e:
-            return torch.zeros(3, 100, 100), torch.zeros(3, 1000, 1000), torch.zeros(100), "", "", ""
+        # except Exception as e:
+        #     return torch.zeros(3, 100, 100), torch.zeros(3, 1000, 1000), torch.zeros(100), "", "", ""
 
 class GridClassifier(nn.Module):
     def __init__(self):
@@ -102,6 +106,10 @@ class GridClassifier(nn.Module):
         # Feature extractor
         resnet = models.resnet18(pretrained=True)
         self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
+
+        # #Freeze feature extractor
+        # for p in self.feature_extractor.parameters():
+        #     p.requires_grad = False 
         
         # 3x3 processing
         self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))
@@ -184,6 +192,167 @@ def count_trainable_parameters(model):
 
 def count_total_parameters(model):
     return sum(p.numel() for p in model.parameters())
+
+
+def strip_module_prefix(state_dict):
+    """Handle checkpoints saved from DDP (keys start with 'module.')."""
+    if not state_dict:
+        return state_dict
+    first_key = next(iter(state_dict.keys()))
+    if first_key.startswith("module."):
+        return {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+    return state_dict
+
+
+def visualize_pred_gt_grid(pred_mask_10x10, gt_mask_10x10, save_path):
+    """
+    pred_mask_10x10, gt_mask_10x10: torch or numpy, shape (10,10), values {0,1}
+    Colors:
+      - GT only:   Red
+      - Pred only: Blue
+      - Overlap:   Purple
+      - None:      White
+    """
+    if torch.is_tensor(pred_mask_10x10):
+        pred = pred_mask_10x10.detach().cpu().numpy()
+    else:
+        pred = pred_mask_10x10
+
+    if torch.is_tensor(gt_mask_10x10):
+        gt = gt_mask_10x10.detach().cpu().numpy()
+    else:
+        gt = gt_mask_10x10
+
+    pred = (pred > 0).astype(np.uint8)
+    gt = (gt > 0).astype(np.uint8)
+
+    # Build RGB image
+    img = np.ones((10, 10, 3), dtype=np.float32)  # white background
+
+    overlap = (pred == 1) & (gt == 1)
+    gt_only = (pred == 0) & (gt == 1)
+    pred_only = (pred == 1) & (gt == 0)
+
+    # Red for GT only
+    img[gt_only] = np.array([1.0, 0.2, 0.2])
+    # Blue for Pred only
+    img[pred_only] = np.array([0.2, 0.2, 1.0])
+    # Purple for overlap
+    img[overlap] = np.array([0.6, 0.2, 0.8])
+
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.figure()
+    plt.imshow(img, interpolation="nearest")
+    plt.xticks(range(10))
+    plt.yticks(range(10))
+    plt.grid(True, linewidth=0.5)
+    plt.title("Pred (Blue) vs GT (Red) | Overlap (Purple)")
+    plt.tight_layout()
+    plt.savefig(str(save_path), dpi=200)
+    plt.close()
+
+
+def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10,
+                  device=None, viz=False, viz_dir="viz_grids", output_json="inference_outputs.json"):
+    """
+    Runs inference on dataset. Computes:
+      - top-3 "hit" accuracy (same as your training code)
+      - IoU based on top-9 predicted cells vs 3x3 GT (9 positives)
+    Optionally saves 10x10 visualization grids per sample.
+    """
+    if device is None:
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    # Load checkpoint
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    state = ckpt.get("model_state_dict", ckpt)  # allow raw state_dict too
+    state = strip_module_prefix(state)
+    model.load_state_dict(state, strict=True)
+    model.to(device)
+    model.eval()
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        num_workers=num_workers, pin_memory=True)
+
+    correct_top3 = 0
+    total = 0
+    total_iou = 0.0
+
+    viz_dir = Path(viz_dir)
+    outputs_list = []
+
+    with torch.no_grad():
+        pbar = tqdm(loader, desc="Inference")
+        for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
+            stitched = stitched.to(device, non_blocking=True)
+            basemap = basemap.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)  # (B,100)
+
+            logits = model(stitched, basemap)  # (B,100)
+
+            # Top-3 hit accuracy (same logic you used)
+            _, top3 = torch.topk(logits, 3, dim=1)  # (B,3)
+            batch_hits = (labels.gather(1, top3).sum(dim=1) > 0).sum().item()
+            correct_top3 += batch_hits
+            total += labels.size(0)
+
+            # IoU with top-9 predicted indices
+            _, top9 = torch.topk(logits, 9, dim=1)  # (B,9)
+            preds = torch.zeros_like(labels)
+            preds.scatter_(1, top9, 1)
+
+            intersection = (preds * labels).sum(dim=1)
+            union = ((preds + labels) > 0).sum(dim=1)
+            iou_percentage = (intersection / union * 100.0).mean().item()
+            total_iou += iou_percentage
+
+            # Optional visualization per-sample
+            if viz:
+                for b in range(labels.size(0)):
+                    gt_10x10 = labels[b].view(10, 10)
+                    pred_10x10 = preds[b].view(10, 10)
+
+                    # Use metas filename as ID
+                    sample_id = Path(metas_path[b]).stem
+                    save_path = viz_dir / f"{sample_id}_grid.png"
+                    visualize_pred_gt_grid(pred_10x10, gt_10x10, save_path)
+
+            # Save raw outputs (optional but useful)
+            probs = torch.sigmoid(logits).detach().cpu().numpy().tolist()
+            top3_idx = top3.detach().cpu().numpy().tolist()
+            top9_idx = top9.detach().cpu().numpy().tolist()
+
+            for b in range(labels.size(0)):
+                outputs_list.append({
+                    "stitched_img_path": stitched_img_path[b],
+                    "basemap_img_path": basemap_img_path[b],
+                    "metas_path": metas_path[b],
+                    "top3_idx": top3_idx[b],
+                    "top9_idx": top9_idx[b],
+                    "probs": probs[b],
+                })
+
+            avg_acc = correct_top3 / max(1, total)
+            avg_iou = total_iou / max(1, (pbar.n + 1))
+            pbar.set_postfix({"top3_acc": f"{avg_acc:.3f}", "iou%": f"{avg_iou:.2f}"})
+
+    final_top3 = correct_top3 / max(1, total)
+    final_iou = total_iou / len(loader)
+
+    with open(output_json, "w") as f:
+        json.dump({
+            "top3_acc": final_top3,
+            "mean_iou_percent": final_iou,
+            "outputs": outputs_list
+        }, f)
+
+    print(f"[Inference] Top-3 Acc: {final_top3:.2%}, Mean IoU%: {final_iou:.2f}")
+    print(f"[Inference] Saved outputs to: {output_json}")
+    if viz:
+        print(f"[Inference] Saved visualizations to: {str(viz_dir)}")
+
 
 def train_model(rank, world_size, num_epochs, model, criterion, optimizer, scheduler,
                train_dataset, val_dataset, batch_size, lr, version, fraction, 
@@ -366,7 +535,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 val_iou = total_iou / len(val_loader)
                 losses["val"].append([epoch, val_loss, val_acc, val_iou])
 
-                scheduler.step(val_loss)
+                scheduler.step()
 
                 if rank == 0:
                     print("LR now:", optimizer.param_groups[0]['lr'])
@@ -393,27 +562,6 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
             break
     cleanup()
 
-
-# class FocalBCEWithLogitsLoss(nn.Module):
-#     def __init__(self, alpha=0.25, gamma=2, reduction='mean'):
-#         super().__init__()
-#         self.alpha = alpha
-#         self.gamma = gamma
-#         self.reduction = reduction
-#         self.bce = nn.BCEWithLogitsLoss()  # Base loss
-
-#     def forward(self, inputs, targets):
-#         bce_loss = self.bce(inputs, targets)
-#         pt = torch.sigmoid(inputs)
-#         p_t = pt * targets + (1 - pt) * (1 - targets)  # p for true class
-        
-#         focal_weight = (1 - p_t).pow(self.gamma)
-#         alpha_factor = self.alpha * targets + (1 - self.alpha) * (1 - targets)
-        
-#         loss = alpha_factor * focal_weight * bce_loss
-            
-#         return loss
-    
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', type=str, default=None)
@@ -422,7 +570,13 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_BCELoss")
+    parser.add_argument('--version', type=str, default="8_BCELoss_CoSineLR")
+    parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
+    parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
+    parser.add_argument('--viz_dir', type=str, default="viz_grids")
+    parser.add_argument('--infer_split', type=str, default="val", choices=["train", "val"])
+    parser.add_argument('--infer_out', type=str, default="inference_outputs.json")
+
     args = parser.parse_args()
 
     # Data transforms
@@ -462,26 +616,43 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        mode='min',
-        factor=0.5,
-        patience=2,
-        threshold=1e-3,
-        min_lr=1e-6,
-        verbose=True
+        T_max=100,   # usually total epochs
+        eta_min=1e-6
     )
 
-    # Distributed training
+    if args.mode == "infer":
+        if args.checkpoint is None or not os.path.exists(args.checkpoint):
+            raise ValueError("For --mode infer, you must provide a valid --checkpoint path.")
+
+        infer_dataset = val_dataset if args.infer_split == "val" else train_dataset
+
+        # Single-GPU inference (no DDP)
+        run_inference(
+            model=model,
+            dataset=infer_dataset,
+            checkpoint_path=args.checkpoint,
+            batch_size=args.batch_size,
+            num_workers=10,
+            device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+            viz=args.viz,
+            viz_dir=args.viz_dir,
+            output_json=args.infer_out
+        )
+        return
+
+    # Otherwise, TRAIN (DDP as before)
     world_size = torch.cuda.device_count()
     mp.spawn(
-    train_model,
-    args=(world_size, args.num_epochs, model, criterion, optimizer, scheduler,
-          train_dataset, val_dataset, args.batch_size, args.lr,
-          args.version, args.train_fraction, args.checkpoint, args.seed),
-    nprocs=world_size,
-    join=True
+        train_model,
+        args=(world_size, args.num_epochs, model, criterion, optimizer, scheduler,
+              train_dataset, val_dataset, args.batch_size, args.lr,
+              args.version, args.train_fraction, args.checkpoint, args.seed),
+        nprocs=world_size,
+        join=True
     )
+
 
 if __name__ == '__main__':
     main()

@@ -190,10 +190,10 @@ def main() -> None:
             # perturbation = np.random.randint(-1*(patch_size-100), (patch_size-100), size=2)
 
             # Define the map patch around the ego vehicle
-            patch_size = 250  # 200 meters in each direction (1km total)
+            patch_size = 250  # 500 m x 500 m map
             
             # Perturb the global coordinates
-            perturbation = np.random.randint(-1*(patch_size-200), (patch_size-200), size=2)
+            perturbation = np.random.randint(-1*(patch_size-50), (patch_size-50), size=2) # Variability increased to 200 m x 200 m. This makes things more complex.
             global_xyz[0] += perturbation[0]
             global_xyz[1] += perturbation[1]
 
