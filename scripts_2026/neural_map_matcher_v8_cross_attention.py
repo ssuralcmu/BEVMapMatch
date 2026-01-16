@@ -185,7 +185,7 @@ def count_trainable_parameters(model):
 def count_total_parameters(model):
     return sum(p.numel() for p in model.parameters())
 
-def train_model(rank, world_size, num_epochs, model, criterion, optimizer, 
+def train_model(rank, world_size, num_epochs, model, criterion, optimizer, scheduler,
                train_dataset, val_dataset, batch_size, lr, version, fraction, 
                checkpoint_path, seed):
     setup(rank, world_size)
@@ -365,6 +365,11 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer,
                 val_acc = correct / total
                 val_iou = total_iou / len(val_loader)
                 losses["val"].append([epoch, val_loss, val_acc, val_iou])
+
+                scheduler.step(val_loss)
+
+                if rank == 0:
+                    print("LR now:", optimizer.param_groups[0]['lr'])
                 
                 if rank == 0 and val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -456,16 +461,27 @@ def main():
 
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    
+
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=2,
+        threshold=1e-3,
+        min_lr=1e-6,
+        verbose=True
+    )
+
     # Distributed training
     world_size = torch.cuda.device_count()
     mp.spawn(
-        train_model,
-        args=(world_size, args.num_epochs, model, criterion, optimizer,
-              train_dataset, val_dataset, args.batch_size, args.lr,
-              args.version, args.train_fraction, args.checkpoint, args.seed),
-        nprocs=world_size,
-        join=True
+    train_model,
+    args=(world_size, args.num_epochs, model, criterion, optimizer, scheduler,
+          train_dataset, val_dataset, args.batch_size, args.lr,
+          args.version, args.train_fraction, args.checkpoint, args.seed),
+    nprocs=world_size,
+    join=True
     )
+
 if __name__ == '__main__':
     main()
