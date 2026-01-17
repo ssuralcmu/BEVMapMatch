@@ -99,66 +99,72 @@ class MapDataset(Dataset):
         # except Exception as e:
         #     return torch.zeros(3, 100, 100), torch.zeros(3, 1000, 1000), torch.zeros(100), "", "", ""
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import models
+
 class GridClassifier(nn.Module):
     def __init__(self):
         super().__init__()
-        
+
         # Feature extractor
         resnet = models.resnet18(pretrained=True)
         self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
 
-        # #Freeze feature extractor
-        # for p in self.feature_extractor.parameters():
-        #     p.requires_grad = False 
-        
-        # 3x3 processing
+        # Freeze feature extractor
+        for p in self.feature_extractor.parameters():
+            p.requires_grad = False
+
+        # Pool basemap to 10x10
         self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))
-        
-        # Cross-attention with local constraints
+
+        # Cross-attention (embed_dim matches ResNet features: 512)
         self.cross_attn = nn.MultiheadAttention(
-            embed_dim=512, 
-            num_heads=8,
+            embed_dim=512,
+            num_heads=4,
             batch_first=True
         )
-        
-        # Positional encoding
-        self.pos_embed = nn.Parameter(torch.randn(100, 512)*0.02)
-        
-        # 3x3 attention mask
-        self.register_buffer('attn_mask', self.create_local_mask())
-        
-        self.fc = nn.Linear(512, 100) 
 
-    def create_local_mask(self):
-        """Create (1, 100) mask allowing queries to see all 3x3 regions"""
-        # Allow full attention since we pre-processed 3x3 context
-        return torch.zeros(1, 100, dtype=torch.bool)  # No masking
+        # Positional encoding (UPDATED): batch-safe + ViT-style init
+        self.pos_embed = nn.Parameter(torch.zeros(1, 100, 512))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        # No mask needed if you want full attention
+        self.attn_mask = None
+
+        self.fc = nn.Linear(512, 100)
 
     def forward(self, stitched, basemap):
         # Feature extraction
-        stitched_feat = self.feature_extractor(stitched)  # (B,512,7,7)
-        basemap_feat = self.feature_extractor(basemap)    # (B,512,25,25)
-        
-        # Process basemap to 10x10 grid with 3x3 context
-        grid = self.grid_pool(basemap_feat)  # (B,512,10,10)
-        grid_3x3 = F.unfold(grid, kernel_size=3, padding=1)  # (B,512*9,100)
-        grid_3x3 = grid_3x3.view(-1, 512, 9, 100).mean(dim=2)  # (B,512,100)
-        
-        # Prepare attention inputs
-        query = F.adaptive_avg_pool2d(stitched_feat, (1,1)).flatten(1)  # (B,512)
-        key = value = grid_3x3.permute(0,2,1) + self.pos_embed  # (B,100,512)
-        
-        # Cross-attention with corrected mask
-        scores, _ = self.cross_attn(
-            query=query.unsqueeze(1),  # (B,1,512)
-            key=key,                   # (B,100,512)
-            value=value,               # (B,100,512)
-            attn_mask=self.attn_mask   # (1,100)
+        stitched_feat = self.feature_extractor(stitched)   # (B,512,h1,w1)
+        basemap_feat  = self.feature_extractor(basemap)    # (B,512,h2,w2)
+
+        # Basemap -> 10x10 grid
+        grid = self.grid_pool(basemap_feat)                # (B,512,10,10)
+
+        # 3x3 local context aggregation per grid cell
+        grid_3x3 = F.unfold(grid, kernel_size=3, padding=1)                  # (B,512*9,100)
+        grid_3x3 = grid_3x3.view(grid_3x3.size(0), 512, 9, 100).mean(dim=2)  # (B,512,100)
+
+        # Attention inputs
+        query = F.adaptive_avg_pool2d(stitched_feat, (1, 1)).flatten(1)      # (B,512)
+        query = query.unsqueeze(1)                                           # (B,1,512)
+
+        key_value = grid_3x3.permute(0, 2, 1)                                 # (B,100,512)
+        key = value = key_value + self.pos_embed                              # (B,100,512)
+
+        # Cross-attention
+        attn_out, _ = self.cross_attn(
+            query=query,   # (B,1,512)
+            key=key,       # (B,100,512)
+            value=value,   # (B,100,512)
+            attn_mask=self.attn_mask
         )
 
-        scores = self.fc(scores.squeeze(1))
-        
-        return scores  # (B,100)
+        scores = self.fc(attn_out.squeeze(1))  # (B,100)
+        return scores
+
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=0.9, gamma=2.5):
