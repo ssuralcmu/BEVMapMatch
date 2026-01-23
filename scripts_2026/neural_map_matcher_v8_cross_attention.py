@@ -22,7 +22,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 GRID_DIM = 10
-TARGET_BLOCK = 2
+TARGET_BLOCK = 1
 POSITIVE_CELLS = TARGET_BLOCK * TARGET_BLOCK
 def perturbation_to_pixel(perturbation, center_x, center_y, pixels_per_meter):
     return (
@@ -651,7 +651,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_Variations_2x2")
+    parser.add_argument('--version', type=str, default="8_Variations_1x1")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--viz_dir', type=str, default="viz_grids")
