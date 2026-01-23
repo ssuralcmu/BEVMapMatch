@@ -21,6 +21,9 @@ from torchvision.ops import sigmoid_focal_loss
 from pathlib import Path
 import matplotlib.pyplot as plt
 
+GRID_DIM = 10
+TARGET_BLOCK = 2
+POSITIVE_CELLS = TARGET_BLOCK * TARGET_BLOCK
 
 class MapDataset(Dataset):
     def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
@@ -81,20 +84,22 @@ class MapDataset(Dataset):
         grid_x = int(x_val // grid_size)
         grid_y = int(y_val // grid_size)
                 
+        grid_dim = GRID_DIM
+        target_block = TARGET_BLOCK
+    
         # Create 10x10 grid mask (2x2 target)
-        grid_label = torch.zeros(10, 10)
+        grid_label = torch.zeros(grid_dim, grid_dim)
 
         # Clamp grid indices to valid range
-        grid_x = int(np.clip(grid_x, 0, 9))
-        grid_y = int(np.clip(grid_y, 0, 9))
+        grid_x = int(np.clip(grid_x, 0, grid_dim - 1))
+        grid_y = int(np.clip(grid_y, 0, grid_dim - 1))
 
-        # Define a 2x2 block with (grid_x, grid_y) as top-left
-        i0 = min(grid_x, 8)  # ensure i0+1 <= 9
-        j0 = min(grid_y, 8)  # ensure j0+1 <= 9
+        max_anchor = grid_dim - target_block
+        i0 = min(grid_x, max_anchor)  # ensure i0+1 <= 9
+        j0 = min(grid_y, max_anchor)  # ensure j0+1 <= 9
 
-        grid_label[i0:i0+2, j0:j0+2] = 1.0
+        grid_label[i0:i0+target_block, j0:j0+target_block] = 1.0
 
-        
         return stitched_img, basemap_img, grid_label.flatten().float(), stitched_img_path, basemap_img_path, metas_path
             
         # except Exception as e:
@@ -265,8 +270,8 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
                   device=None, viz=False, viz_dir="viz_grids", output_json="inference_outputs.json"):
     """
     Runs inference on dataset. Computes:
-      - top-3 "hit" accuracy (same as your training code)
-      - IoU based on top-9 predicted cells vs 3x3 GT (9 positives)
+      - top-k "hit" accuracy (k matches the number of positive cells)
+      - IoU based on top-k predicted cells vs GT positives
     Optionally saves 10x10 visualization grids per sample.
     """
     if device is None:
@@ -283,7 +288,7 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, pin_memory=True)
 
-    correct_top3 = 0
+    correct_topk = 0
     total = 0
     total_iou = 0.0
 
@@ -299,16 +304,16 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
 
             logits = model(stitched, basemap)  # (B,100)
 
-            # Top-3 hit accuracy (same logic you used)
-            _, top3 = torch.topk(logits, 3, dim=1)  # (B,3)
-            batch_hits = (labels.gather(1, top3).sum(dim=1) > 0).sum().item()
-            correct_top3 += batch_hits
+            # Top-k hit accuracy (k matches the number of positives)
+            _, topk = torch.topk(logits, POSITIVE_CELLS, dim=1)  # (B,k)
+            batch_hits = (labels.gather(1, topk).sum(dim=1) > 0).sum().item()
+            correct_topk += batch_hits
             total += labels.size(0)
 
-            # IoU with top-9 predicted indices
-            _, top9 = torch.topk(logits, 9, dim=1)  # (B,9)
+            # IoU with top-k predicted indices
+            _, topk_iou = torch.topk(logits, POSITIVE_CELLS, dim=1)  # (B,k)
             preds = torch.zeros_like(labels)
-            preds.scatter_(1, top9, 1)
+            preds.scatter_(1, topk_iou, 1)
 
             intersection = (preds * labels).sum(dim=1)
             union = ((preds + labels) > 0).sum(dim=1)
@@ -328,34 +333,32 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
 
             # Save raw outputs (optional but useful)
             probs = torch.sigmoid(logits).detach().cpu().numpy().tolist()
-            top3_idx = top3.detach().cpu().numpy().tolist()
-            top9_idx = top9.detach().cpu().numpy().tolist()
+            topk_idx = topk.detach().cpu().numpy().tolist()
 
             for b in range(labels.size(0)):
                 outputs_list.append({
                     "stitched_img_path": stitched_img_path[b],
                     "basemap_img_path": basemap_img_path[b],
                     "metas_path": metas_path[b],
-                    "top3_idx": top3_idx[b],
-                    "top9_idx": top9_idx[b],
+                    "topk_idx": topk_idx[b],
                     "probs": probs[b],
                 })
 
-            avg_acc = correct_top3 / max(1, total)
+            avg_acc = correct_topk / max(1, total)
             avg_iou = total_iou / max(1, (pbar.n + 1))
-            pbar.set_postfix({"top3_acc": f"{avg_acc:.3f}", "iou%": f"{avg_iou:.2f}"})
+            pbar.set_postfix({"topk_acc": f"{avg_acc:.3f}", "iou%": f"{avg_iou:.2f}"})
 
-    final_top3 = correct_top3 / max(1, total)
+    final_topk = correct_topk / max(1, total)
     final_iou = total_iou / len(loader)
 
     with open(output_json, "w") as f:
         json.dump({
-            "top3_acc": final_top3,
+            "topk_acc": final_topk,
             "mean_iou_percent": final_iou,
             "outputs": outputs_list
         }, f)
 
-    print(f"[Inference] Top-3 Acc: {final_top3:.2%}, Mean IoU%: {final_iou:.2f}")
+    print(f"[Inference] Top-{POSITIVE_CELLS} Acc: {final_topk:.2%}, Mean IoU%: {final_iou:.2f}")
     print(f"[Inference] Saved outputs to: {output_json}")
     if viz:
         print(f"[Inference] Saved visualizations to: {str(viz_dir)}")
@@ -465,15 +468,15 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': total_loss/(pbar.n+1)})
 
-                _, top3 = torch.topk(outputs, 3, dim=1)
-                correct += (labels.gather(1, top3).sum(dim=1) > 0).sum().item()
+                _, topk = torch.topk(outputs, POSITIVE_CELLS, dim=1)
+                correct += (labels.gather(1, topk).sum(dim=1) > 0).sum().item()
                 total += labels.size(0)
 
-                #Calculate IOU
-                _, top9 = torch.topk(outputs, 9, dim=1)  # Shape: (B, 9)
-                # Create binary predictions tensor based on top-9 indices
+                # Calculate IOU
+                _, topk_iou = torch.topk(outputs, POSITIVE_CELLS, dim=1)  # Shape: (B, k)
+                # Create binary predictions tensor based on top-k indices
                 predictions = torch.zeros_like(labels)
-                predictions.scatter_(1, top9, 1)
+                predictions.scatter_(1, topk_iou, 1)
 
                 # Calculate Intersection over Union (IoU)
                 intersection = (predictions * labels).sum(dim=1)  # Element-wise multiplication and sum
@@ -518,16 +521,16 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                         val_loss += criterion(outputs, labels).item()
                         if rank == 0:
                             pbar.set_postfix({'val_loss': val_loss / (pbar.n + 1)})
-                        # Calculate top-3 accuracy
-                        _, top3 = torch.topk(outputs, 3, dim=1)
-                        correct += (labels.gather(1, top3).sum(dim=1) > 0).sum().item()
+                        # Calculate top-k accuracy
+                        _, topk = torch.topk(outputs, POSITIVE_CELLS, dim=1)
+                        correct += (labels.gather(1, topk).sum(dim=1) > 0).sum().item()
                         total += labels.size(0)
 
-                        #Calculate IOU
-                        _, top9 = torch.topk(outputs, 9, dim=1)  # Shape: (B, 9)
-                        # Create binary predictions tensor based on top-9 indices
+                        # Calculate IOU
+                        _, topk_iou = torch.topk(outputs, POSITIVE_CELLS, dim=1)  # Shape: (B, k)
+                        # Create binary predictions tensor based on top-k indices
                         predictions = torch.zeros_like(labels)
-                        predictions.scatter_(1, top9, 1)
+                        predictions.scatter_(1, topk_iou, 1)
 
                         # Calculate Intersection over Union (IoU)
                         intersection = (predictions * labels).sum(dim=1)  # Element-wise multiplication and sum
@@ -559,7 +562,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                     torch.save(checkpoint, 'best_map_location_model_val_'+unique_name+'.pth')
         
             if rank == 0:
-                print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Top-3 Train Acc: {train_acc:.2%}, Val Loss: {val_loss:.4f}, Top-3 Val Acc: {val_acc:.2%}, Train IoU: {train_iou:.2f}, Val IoU: {val_iou:.2f}")
+                print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Top-{POSITIVE_CELLS} Train Acc: {train_acc:.2%}, Val Loss: {val_loss:.4f}, Top-{POSITIVE_CELLS} Val Acc: {val_acc:.2%}, Train IoU: {train_iou:.2f}, Val IoU: {val_iou:.2f}")
                 with open('loss_'+unique_name+'.json', 'a') as f:
                     json.dump(losses, f)
         except Exception as e:
@@ -574,7 +577,7 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--train_fraction', type=float, default=1.0)
     parser.add_argument('--num_epochs', type=int, default=60)
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--version', type=str, default="8_Variations_2x2")
