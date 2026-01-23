@@ -24,6 +24,11 @@ import matplotlib.pyplot as plt
 GRID_DIM = 10
 TARGET_BLOCK = 2
 POSITIVE_CELLS = TARGET_BLOCK * TARGET_BLOCK
+def perturbation_to_pixel(perturbation, center_x, center_y, pixels_per_meter):
+    return (
+        center_x - perturbation[1] * pixels_per_meter,
+        center_y - perturbation[0] * pixels_per_meter,
+    )
 
 class MapDataset(Dataset):
     def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
@@ -77,8 +82,12 @@ class MapDataset(Dataset):
         basemap_size_px = basemap_img.shape[1]
         meters_per_patch = 500.0
         pixels_per_meter = basemap_size_px / meters_per_patch
-        x_val = center_x - metas['perturbation'][0] * pixels_per_meter
-        y_val = center_y - metas['perturbation'][1] * pixels_per_meter
+        x_val, y_val = perturbation_to_pixel(
+            metas['perturbation'],
+            center_x,
+            center_y,
+            pixels_per_meter,
+        )
         
         grid_size = 100  # Each grid is 100x100 pixels
         grid_x = int(x_val // grid_size)
@@ -276,9 +285,12 @@ def visualize_basemap_topk(basemap_path, metas_path, topk_idx, topk_probs, save_
     center_x, center_y = width // 2, height // 2
     meters_per_patch = 500.0
     pixels_per_meter = width / meters_per_patch
-    gt_x = center_x - metas['perturbation'][0] * pixels_per_meter
-    gt_y = center_y - metas['perturbation'][1] * pixels_per_meter
-
+    gt_x, gt_y = perturbation_to_pixel(
+        metas['perturbation'],
+        center_x,
+        center_y,
+        pixels_per_meter,
+    )
     topk_idx = np.array(topk_idx)
     topk_probs = np.array(topk_probs)
     pred_x = (topk_idx % GRID_DIM + 0.5) * cell_width
@@ -636,7 +648,7 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--train_fraction', type=float, default=1.0)
     parser.add_argument('--num_epochs', type=int, default=60)
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--version', type=str, default="8_Variations_2x2")
