@@ -95,8 +95,8 @@ class MapDataset(Dataset):
         grid_y = int(np.clip(grid_y, 0, grid_dim - 1))
 
         max_anchor = grid_dim - target_block
-        i0 = min(grid_x, max_anchor)  # ensure i0+1 <= 9
-        j0 = min(grid_y, max_anchor)  # ensure j0+1 <= 9
+        i0 = min(grid_y, max_anchor)  # ensure i0+1 <= 9
+        j0 = min(grid_x, max_anchor)  # ensure j0+1 <= 9
 
         grid_label[i0:i0+target_block, j0:j0+target_block] = 1.0
 
@@ -265,6 +265,52 @@ def visualize_pred_gt_grid(pred_mask_10x10, gt_mask_10x10, save_path):
     plt.savefig(str(save_path), dpi=200)
     plt.close()
 
+def visualize_basemap_topk(basemap_path, metas_path, topk_idx, topk_probs, save_path):
+    basemap_img = Image.open(basemap_path).convert("RGB")
+    basemap_np = np.array(basemap_img)
+    height, width = basemap_np.shape[0], basemap_np.shape[1]
+    cell_width = width / GRID_DIM
+    cell_height = height / GRID_DIM
+
+    metas = np.load(metas_path, allow_pickle=True).item()
+    center_x, center_y = width // 2, height // 2
+    meters_per_patch = 500.0
+    pixels_per_meter = width / meters_per_patch
+    gt_x = center_x - metas['perturbation'][0] * pixels_per_meter
+    gt_y = center_y - metas['perturbation'][1] * pixels_per_meter
+
+    topk_idx = np.array(topk_idx)
+    topk_probs = np.array(topk_probs)
+    pred_x = (topk_idx % GRID_DIM + 0.5) * cell_width
+    pred_y = (topk_idx // GRID_DIM + 0.5) * cell_height
+
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.figure(figsize=(6, 6))
+    plt.imshow(basemap_np)
+    plt.axis("off")
+
+    plt.scatter(gt_x, gt_y, s=220, c="blue", edgecolors="white", linewidths=1.5, label="GT")
+
+    plt.scatter(pred_x, pred_y, s=80, c="green", edgecolors="white", linewidths=1.0, label="Pred Top-k")
+
+    for x, y, prob in zip(pred_x, pred_y, topk_probs):
+        plt.text(
+            x + 4,
+            y - 4,
+            f"{prob:.2f}",
+            color="white",
+            fontsize=8,
+            bbox=dict(facecolor="black", alpha=0.6, pad=1, edgecolor="none")
+        )
+
+    plt.legend(loc="upper right", framealpha=0.8)
+    plt.tight_layout()
+    plt.savefig(str(save_path), dpi=200, bbox_inches="tight")
+    plt.close()
+
+
 
 def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10,
                   device=None, viz=False, viz_dir="viz_grids", output_json="inference_outputs.json"):
@@ -330,6 +376,19 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
                     sample_id = Path(metas_path[b]).stem
                     save_path = viz_dir / f"{sample_id}_grid.png"
                     visualize_pred_gt_grid(pred_10x10, gt_10x10, save_path)
+                    topk_probs = torch.sigmoid(logits[b]).gather(0, topk[b]).detach().cpu().numpy()
+                    basemap_save_path = viz_dir / f"{sample_id}_basemap_topk.png"
+                    visualize_basemap_topk(
+                        basemap_img_path[b],
+                        metas_path[b],
+                        topk[b].detach().cpu().numpy(),
+                        topk_probs,
+                        basemap_save_path
+                    )
+                    stitched_save_path = viz_dir / f"{sample_id}_stitched.png"
+                    stitched_img = Image.open(stitched_img_path[b]).convert("RGB")
+                    stitched_save_path.parent.mkdir(parents=True, exist_ok=True)
+                    stitched_img.save(stitched_save_path)
 
             # Save raw outputs (optional but useful)
             probs = torch.sigmoid(logits).detach().cpu().numpy().tolist()
