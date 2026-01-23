@@ -57,7 +57,7 @@ class MapDataset(Dataset):
         basemap_img = Image.open(basemap_img_path).convert('RGB')
     
         basemap_img = np.array(basemap_img)
-        basemap_img = np.flipud(basemap_img)
+        # basemap_img = np.flipud(basemap_img)
         basemap_img = Image.fromarray(basemap_img)
 
         if self.transform_gen:
@@ -71,28 +71,29 @@ class MapDataset(Dataset):
         center_x, center_y = basemap_img.shape[1] // 2, basemap_img.shape[2] // 2
         # print("center_x: ", center_x)
         # print("center_y: ", center_y)
-        x_val = center_x - metas['perturbation'][0]
-        y_val = center_y - metas['perturbation'][1]
+        basemap_size_px = basemap_img.shape[1]
+        meters_per_patch = 500.0
+        pixels_per_meter = basemap_size_px / meters_per_patch
+        x_val = center_x - metas['perturbation'][0] * pixels_per_meter
+        y_val = center_y - metas['perturbation'][1] * pixels_per_meter
         
         grid_size = 100  # Each grid is 100x100 pixels
         grid_x = int(x_val // grid_size)
         grid_y = int(y_val // grid_size)
-        
-        # Create 10x10 grid mask for multi-label classification
+                
+        # Create 10x10 grid mask (2x2 target)
         grid_label = torch.zeros(10, 10)
-        
-        # Mark overlapping 2x2 grids. So basically if the center of the map is at (x_val, y_val),
-        # we need to find the grid cell it falls into and mark that cell and its surrounding cells.
-        # This will create a 3x3 area around the grid cell that contains the center. 
-        # This is the only way to have a unique label for each grid cell and its surrounding cells.
-        min_i = max(0, grid_x - 1)
-        max_i = min(9, grid_x + 2)
-        min_j = max(0, grid_y - 1)
-        max_j = min(9, grid_y + 2)
-        
-        for i in range(min_i, max_i):
-            for j in range(min_j, max_j):
-                grid_label[i, j] = 1
+
+        # Clamp grid indices to valid range
+        grid_x = int(np.clip(grid_x, 0, 9))
+        grid_y = int(np.clip(grid_y, 0, 9))
+
+        # Define a 2x2 block with (grid_x, grid_y) as top-left
+        i0 = min(grid_x, 8)  # ensure i0+1 <= 9
+        j0 = min(grid_y, 8)  # ensure j0+1 <= 9
+
+        grid_label[i0:i0+2, j0:j0+2] = 1.0
+
         
         return stitched_img, basemap_img, grid_label.flatten().float(), stitched_img_path, basemap_img_path, metas_path
             
@@ -112,9 +113,9 @@ class GridClassifier(nn.Module):
         resnet = models.resnet18(pretrained=True)
         self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
 
-        # Freeze feature extractor
-        for p in self.feature_extractor.parameters():
-            p.requires_grad = False
+        # # Freeze feature extractor
+        # for p in self.feature_extractor.parameters():
+        #     p.requires_grad = False
 
         # Pool basemap to 10x10
         self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))
@@ -122,7 +123,7 @@ class GridClassifier(nn.Module):
         # Cross-attention (embed_dim matches ResNet features: 512)
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=512,
-            num_heads=4,
+            num_heads=8,
             batch_first=True
         )
 
@@ -572,11 +573,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--train_fraction', type=float, default=1.0)
-    parser.add_argument('--num_epochs', type=int, default=100)
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--num_epochs', type=int, default=60)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_BCELoss_CoSineLR")
+    parser.add_argument('--version', type=str, default="8_Variations_2x2")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--viz_dir', type=str, default="viz_grids")
