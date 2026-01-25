@@ -216,9 +216,36 @@ class FocalLoss(nn.Module):
             reduction="mean"  # Required for DDP compatibility
         )
 
+def build_soft_targets(labels, grid_dim, sigma):
+    batch_size = labels.size(0)
+    labels_flat = labels.view(batch_size, -1)
+    center_idx = labels_flat.argmax(dim=1)
+    center_y = (center_idx // grid_dim).float()
+    center_x = (center_idx % grid_dim).float()
+    centers = torch.stack([center_y, center_x], dim=1)
+
+    coords = torch.stack(
+        torch.meshgrid(
+            torch.arange(grid_dim, device=labels.device),
+            torch.arange(grid_dim, device=labels.device),
+            indexing="ij",
+        ),
+        dim=-1,
+    ).view(-1, 2)
+
+    diff = coords.unsqueeze(0) - centers.unsqueeze(1)
+    dist2 = (diff ** 2).sum(dim=2)
+    soft_targets = torch.exp(-dist2 / (2 * sigma ** 2))
+    soft_targets = soft_targets / (soft_targets.sum(dim=1, keepdim=True) + 1e-8)
+    return soft_targets
+
+def soft_cross_entropy(logits, soft_targets):
+    log_probs = F.log_softmax(logits, dim=1)
+    return (-soft_targets * log_probs).sum(dim=1).mean()
+
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12800'
+    os.environ['MASTER_PORT'] = '12010'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -460,7 +487,8 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
 
 def train_model(rank, world_size, num_epochs, model, criterion, optimizer, scheduler,
                train_dataset, val_dataset, batch_size, lr, version, fraction, 
-               checkpoint_path, seed, validate_every, amp):
+               checkpoint_path, seed, validate_every, amp, distance_loss_weight,
+               distance_sigma):
     setup(rank, world_size)
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -543,6 +571,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
             model.train()
             train_loader.sampler.set_epoch(epoch)
             total_loss = 0.0
+            base_loss_total = 0.0
+            distance_loss_total = 0.0
             correct = 0
             total = 0
             total_iou = 0.0
@@ -558,12 +588,23 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 with torch.cuda.amp.autocast(enabled=amp):
                     outputs = model(stitched, basemap)
                     loss = criterion(outputs, labels)
+
+                    if distance_loss_weight > 0:
+                        soft_targets = build_soft_targets(labels, GRID_DIM, distance_sigma)
+                        distance_loss = soft_cross_entropy(outputs, soft_targets)
+                        loss = loss + distance_loss_weight * distance_loss
+
+                base_loss = loss.detach() if distance_loss_weight <= 0 else criterion(outputs, labels).detach()
+                distance_loss = torch.tensor(0.0, device=device) if distance_loss_weight <= 0 else distance_loss.detach()
+
                 scaler.scale(loss).backward()
                 # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 scaler.step(optimizer)
                 scaler.update()
                 
                 total_loss += loss.item()
+                base_loss_total += base_loss.item()
+                distance_loss_total += distance_loss.item()
                 pbar.set_postfix({'loss': total_loss/(pbar.n+1)})
 
                 _, topk = torch.topk(outputs, POSITIVE_CELLS, dim=1)
@@ -585,6 +626,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 total_iou += iou_percentage
             
             train_loss = total_loss / len(train_loader)
+            train_base_loss = base_loss_total / len(train_loader)
+            train_distance_loss = distance_loss_total / len(train_loader)
             train_acc = correct / total
             train_iou = total_iou / len(train_loader)
             losses["train"].append([epoch, train_loss, train_acc, train_iou])
@@ -605,6 +648,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
             if epoch % validate_every == 0 or epoch == start_epoch:
                 model.eval()
                 val_loss = 0.0
+                val_base_loss_total = 0.0
+                val_distance_loss_total = 0.0                
                 correct = 0
                 total = 0
                 total_iou = 0.0
@@ -617,7 +662,17 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                         
                         with torch.cuda.amp.autocast(enabled=amp):
                             outputs = model(stitched, basemap)
-                            val_loss += criterion(outputs, labels).item()
+                            base_loss = criterion(outputs, labels)
+                            loss = base_loss
+                            if distance_loss_weight > 0:
+                                soft_targets = build_soft_targets(labels, GRID_DIM, distance_sigma)
+                                distance_loss = soft_cross_entropy(outputs, soft_targets)
+                                loss = loss + distance_loss_weight * distance_loss
+                            else:
+                                distance_loss = torch.tensor(0.0, device=device)
+                            val_loss += loss.item()
+                            val_base_loss_total += base_loss.item()
+                            val_distance_loss_total += distance_loss.item()
                         if rank == 0:
                             pbar.set_postfix({'val_loss': val_loss / (pbar.n + 1)})
                         # Calculate top-k accuracy
@@ -640,6 +695,8 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                         total_iou += iou_percentage
                 
                 val_loss /= len(val_loader)
+                val_base_loss = val_base_loss_total / len(val_loader)
+                val_distance_loss = val_distance_loss_total / len(val_loader)                
                 val_acc = correct / total
                 val_iou = total_iou / len(val_loader)
                 losses["val"].append([epoch, val_loss, val_acc, val_iou])
@@ -661,7 +718,16 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                     torch.save(checkpoint, 'best_map_location_model_val_'+unique_name+'.pth')
         
             if rank == 0:
-                print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Top-{POSITIVE_CELLS} Train Acc: {train_acc:.2%}, Val Loss: {val_loss:.4f}, Top-{POSITIVE_CELLS} Val Acc: {val_acc:.2%}, Train IoU: {train_iou:.2f}, Val IoU: {val_iou:.2f}")
+                print(
+                    f"Epoch [{epoch+1}/{num_epochs}], "
+                    f"Train Loss: {train_loss:.4f} "
+                    f"(base {train_base_loss:.4f}, dist {train_distance_loss:.4f}), "
+                    f"Top-{POSITIVE_CELLS} Train Acc: {train_acc:.2%}, "
+                    f"Val Loss: {val_loss:.4f} "
+                    f"(base {val_base_loss:.4f}, dist {val_distance_loss:.4f}), "
+                    f"Top-{POSITIVE_CELLS} Val Acc: {val_acc:.2%}, "
+                    f"Train IoU: {train_iou:.2f}, Val IoU: {val_iou:.2f}"
+                )
                 with open('loss_'+unique_name+'.json', 'a') as f:
                     json.dump(losses, f)
         except Exception as e:
@@ -679,7 +745,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="9_dinov2_faster")
+    parser.add_argument('--version', type=str, default="9_dinov2_extraloss_wt0point1")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--validate_every', type=int, default=1)
@@ -687,7 +753,11 @@ def main():
     parser.add_argument('--viz_dir', type=str, default="viz_grids")
     parser.add_argument('--infer_split', type=str, default="val", choices=["train", "val"])
     parser.add_argument('--infer_out', type=str, default="inference_outputs.json")
-
+    parser.add_argument('--distance_loss_weight', type=float, default=0.1,
+                        help="Weight for distance-aware soft target loss.")
+    parser.add_argument('--distance_sigma', type=float, default=0.8,
+                        help="Gaussian sigma (grid cells) for distance-aware loss.")
+    
     args = parser.parse_args()
 
     # Data transforms
@@ -760,7 +830,8 @@ def main():
         args=(world_size, args.num_epochs, model, criterion, optimizer, scheduler,
               train_dataset, val_dataset, args.batch_size, args.lr,
               args.version, args.train_fraction, args.checkpoint, args.seed,
-              args.validate_every, args.amp),
+              args.validate_every, args.amp, args.distance_loss_weight,
+              args.distance_sigma),
         nprocs=world_size,
         join=True
     )
