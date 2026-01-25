@@ -96,8 +96,6 @@ class MapDataset(Dataset):
         grid_dim = GRID_DIM
         target_block = TARGET_BLOCK
     
-        # Create 10x10 grid mask (2x2 target)
-        grid_label = torch.zeros(grid_dim, grid_dim)
 
         # Clamp grid indices to valid range
         grid_x = int(np.clip(grid_x, 0, grid_dim - 1))
@@ -107,10 +105,10 @@ class MapDataset(Dataset):
         i0 = min(grid_y, max_anchor)  # ensure i0+1 <= 9
         j0 = min(grid_x, max_anchor)  # ensure j0+1 <= 9
 
-        grid_label[i0:i0+target_block, j0:j0+target_block] = 1.0
+        class_idx = i0 * grid_dim + j0
 
-        return stitched_img, basemap_img, grid_label.flatten().float(), stitched_img_path, basemap_img_path, metas_path
-            
+        return stitched_img, basemap_img, class_idx, stitched_img_path, basemap_img_path, metas_path
+
         # except Exception as e:
         #     return torch.zeros(3, 100, 100), torch.zeros(3, 1000, 1000), torch.zeros(100), "", "", ""
 
@@ -123,46 +121,72 @@ class GridClassifier(nn.Module):
     def __init__(self):
         super().__init__()
 
+        # Feature extractor
         resnet = models.resnet18(pretrained=True)
         self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
 
+        # # Freeze feature extractor
+        for p in self.feature_extractor.parameters():
+            p.requires_grad = False
+
+        self.channel_reduce = nn.Conv2d(512, 128, kernel_size=1)
+
+        # Pool basemap to 10x10
         self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))
 
-        # NEW: learnable similarity temperature (logit scale)
-        self.sim_temperature = nn.Parameter(torch.tensor(10.0))
+        # Cross-attention (embed_dim matches reduced features: 128)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=128,
+            num_heads=4,
+            batch_first=True
+        )
+
+        # Positional encoding for basemap tokens
+        self.pos_embed = nn.Parameter(torch.zeros(1, 100, 128))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        # NEW: positional encoding for 5x5 stitched tokens
+        self.stitched_pos_embed = nn.Parameter(torch.zeros(1, 25, 128))
+        nn.init.trunc_normal_(self.stitched_pos_embed, std=0.02)
+
+        self.fc = nn.Linear(128, 100)
+
 
     def forward(self, stitched, basemap):
+        # Feature extraction
         stitched_feat = self.feature_extractor(stitched)   # (B,512,h1,w1)
         basemap_feat  = self.feature_extractor(basemap)    # (B,512,h2,w2)
 
-        # basemap -> 10x10 grid tokens with 3x3 local context
-        grid = self.grid_pool(basemap_feat)  # (B,512,10,10)
-        grid_3x3 = F.unfold(grid, kernel_size=3, padding=1)                  # (B,512*9,100)
-        grid_3x3 = grid_3x3.view(grid_3x3.size(0), 512, 9, 100).mean(dim=2)  # (B,512,100)
+        stitched_feat = self.channel_reduce(stitched_feat)
+        basemap_feat = self.channel_reduce(basemap_feat)
 
-        # ===== Option B: correlation / cost-volume scoring =====
+        # Basemap -> 10x10 grid
+        grid = self.grid_pool(basemap_feat)                # (B,512,10,10)
 
-        # stitched tokens: (B,25,512)
-        stitched_tok = F.adaptive_avg_pool2d(stitched_feat, (5, 5))          # (B,512,5,5)
-        stitched_tok = stitched_tok.flatten(2).permute(0, 2, 1)              # (B,25,512)
+        # 3x3 local context aggregation per grid cell
+        grid_3x3 = F.unfold(grid, kernel_size=3, padding=1)                  # (B,128*9,100)
+        grid_3x3 = grid_3x3.view(grid_3x3.size(0), 128, 9, 100).mean(dim=2)  # (B,128,100)
 
-        # basemap tokens: (B,100,512)
-        map_tok = grid_3x3.permute(0, 2, 1)                                  # (B,100,512)
+        # NEW: stitched -> 5x5 tokens (B,25,512)
+        stitched_tok = F.adaptive_avg_pool2d(stitched_feat, (5, 5))          # (B,128,5,5)
+        stitched_tok = stitched_tok.flatten(2).permute(0, 2, 1)              # (B,25,128)
+        stitched_tok = stitched_tok + self.stitched_pos_embed                # (B,25,128)
 
-        # cosine similarity
-        stitched_tok = F.normalize(stitched_tok, dim=-1)
-        map_tok = F.normalize(map_tok, dim=-1)
+        # basemap tokens (B,100,128)
+        key_value = grid_3x3.permute(0, 2, 1)                                 # (B,100,128)
+        key = value = key_value + self.pos_embed                              # (B,100,128)
 
-        # cost volume: (B,25,100)
-        sim = torch.einsum("bqd,bmd->bqm", stitched_tok, map_tok)
+        # Cross-attention: 25 queries attend to 100 basemap cells
+        attn_out, _ = self.cross_attn(
+            query=stitched_tok,
+            key=key,
+            value=value
+        )
 
-        # aggregate stitched tokens -> per-map-cell logits: (B,100)
-        scores = sim.max(dim=1).values
-        # scores = sim.mean(dim=1)       # alternate
 
-        # sharpen logits
-        scores = scores * self.sim_temperature.clamp(1.0, 50.0)
-
+        # Pool the 25 outputs -> one vector, then score 100 cells
+        attn_pooled = attn_out.mean(dim=1)                                   # (B,512)
+        scores = self.fc(attn_pooled)                                        # (B,100)
         return scores
 
 
@@ -183,7 +207,7 @@ class FocalLoss(nn.Module):
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '17733'
+    os.environ['MASTER_PORT'] = '18933'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -344,30 +368,32 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
         for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
             stitched = stitched.to(device, non_blocking=True)
             basemap = basemap.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)  # (B,100)
+            labels = labels.to(device, non_blocking=True, dtype=torch.long)
 
             logits = model(stitched, basemap)  # (B,100)
 
             # Top-k hit accuracy (k matches the number of positives)
             _, topk = torch.topk(logits, POSITIVE_CELLS, dim=1)  # (B,k)
-            batch_hits = (labels.gather(1, topk).sum(dim=1) > 0).sum().item()
+            batch_hits = (topk.squeeze(1) == labels).sum().item()
             correct_topk += batch_hits
             total += labels.size(0)
 
             # IoU with top-k predicted indices
             _, topk_iou = torch.topk(logits, POSITIVE_CELLS, dim=1)  # (B,k)
-            preds = torch.zeros_like(labels)
+            preds = torch.zeros(labels.size(0), GRID_DIM * GRID_DIM, device=labels.device)
+            
             preds.scatter_(1, topk_iou, 1)
+            labels_one_hot = F.one_hot(labels, num_classes=GRID_DIM * GRID_DIM).float()
 
-            intersection = (preds * labels).sum(dim=1)
-            union = ((preds + labels) > 0).sum(dim=1)
+            intersection = (preds * labels_one_hot).sum(dim=1)
+            union = ((preds + labels_one_hot) > 0).sum(dim=1)
             iou_percentage = (intersection / union * 100.0).mean().item()
             total_iou += iou_percentage
 
             # Optional visualization per-sample
             if viz:
                 for b in range(labels.size(0)):
-                    gt_10x10 = labels[b].view(10, 10)
+                    gt_10x10 = labels_one_hot[b].view(10, 10)
                     pred_10x10 = preds[b].view(10, 10)
 
                     # Use metas filename as ID
@@ -389,7 +415,7 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
                     stitched_img.save(stitched_save_path)
 
             # Save raw outputs (optional but useful)
-            probs = torch.sigmoid(logits).detach().cpu().numpy().tolist()
+            probs = torch.softmax(logits, dim=1).detach().cpu().numpy().tolist()
             topk_idx = topk.detach().cpu().numpy().tolist()
 
             for b in range(labels.size(0)):
@@ -445,7 +471,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
     # )
     # criterion = FocalBCEWithLogitsLoss(alpha=1, gamma=0)
 
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.CrossEntropyLoss()
     # criterion = FocalLoss(alpha=0.9, gamma=2)
     # criterion = lambda inputs, targets: sigmoid_focal_loss(
     #     inputs, targets, alpha=0.9, gamma=2.5, reduction="mean"
@@ -511,7 +537,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
             for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
                 stitched = stitched.to(device)
                 basemap = basemap.to(device)
-                labels = labels.to(device)
+                labels = labels.to(device, dtype=torch.long)
                 
                 optimizer.zero_grad()
                 # import pdb; pdb.set_trace()
@@ -526,18 +552,19 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 pbar.set_postfix({'loss': total_loss/(pbar.n+1)})
 
                 _, topk = torch.topk(outputs, POSITIVE_CELLS, dim=1)
-                correct += (labels.gather(1, topk).sum(dim=1) > 0).sum().item()
+                correct += (topk.squeeze(1) == labels).sum().item()
                 total += labels.size(0)
 
                 # Calculate IOU
                 _, topk_iou = torch.topk(outputs, POSITIVE_CELLS, dim=1)  # Shape: (B, k)
                 # Create binary predictions tensor based on top-k indices
-                predictions = torch.zeros_like(labels)
+                predictions = torch.zeros(labels.size(0), GRID_DIM * GRID_DIM, device=labels.device)
                 predictions.scatter_(1, topk_iou, 1)
+                labels_one_hot = F.one_hot(labels, num_classes=GRID_DIM * GRID_DIM).float()
 
                 # Calculate Intersection over Union (IoU)
-                intersection = (predictions * labels).sum(dim=1)  # Element-wise multiplication and sum
-                union = ((predictions + labels) > 0).sum(dim=1)  # Union is the count of non-zero elements
+                intersection = (predictions * labels_one_hot).sum(dim=1)  # Element-wise multiplication and sum
+                union = ((predictions + labels_one_hot) > 0).sum(dim=1)  # Union is the count of non-zero elements
 
                 # IoU as a percentage
                 iou_percentage = (intersection / union * 100).mean().item()
@@ -572,7 +599,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                     for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
                         stitched = stitched.to(device)
                         basemap = basemap.to(device)
-                        labels = labels.to(device)
+                        labels = labels.to(device, dtype=torch.long)
                         
                         outputs = model(stitched, basemap)
                         val_loss += criterion(outputs, labels).item()
@@ -580,19 +607,20 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                             pbar.set_postfix({'val_loss': val_loss / (pbar.n + 1)})
                         # Calculate top-k accuracy
                         _, topk = torch.topk(outputs, POSITIVE_CELLS, dim=1)
-                        correct += (labels.gather(1, topk).sum(dim=1) > 0).sum().item()
+                        correct += (topk.squeeze(1) == labels).sum().item()
                         total += labels.size(0)
 
                         # Calculate IOU
                         _, topk_iou = torch.topk(outputs, POSITIVE_CELLS, dim=1)  # Shape: (B, k)
                         # Create binary predictions tensor based on top-k indices
-                        predictions = torch.zeros_like(labels)
+                        predictions = torch.zeros(labels.size(0), GRID_DIM * GRID_DIM, device=labels.device)
                         predictions.scatter_(1, topk_iou, 1)
+                        labels_one_hot = F.one_hot(labels, num_classes=GRID_DIM * GRID_DIM).float()
 
                         # Calculate Intersection over Union (IoU)
-                        intersection = (predictions * labels).sum(dim=1)  # Element-wise multiplication and sum
-                        union = ((predictions + labels) > 0).sum(dim=1)  # Union is the count of non-zero elements
-
+                        intersection = (predictions * labels_one_hot).sum(dim=1)  # Element-wise multiplication and sum
+                        union = ((predictions + labels_one_hot) > 0).sum(dim=1)  # Union is the count of non-zero elements
+                        
                         # IoU as a percentage
                         iou_percentage = (intersection / union * 100).mean().item()
                         total_iou += iou_percentage
@@ -637,7 +665,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=24)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="10")
+    parser.add_argument('--version', type=str, default="9_Variations_1x1")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--viz_dir', type=str, default="viz_grids")
@@ -681,7 +709,7 @@ def main():
     criterion=None
 
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,

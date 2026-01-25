@@ -124,8 +124,9 @@ class GridClassifier(nn.Module):
         super().__init__()
 
         # Feature extractor
-        resnet = models.resnet18(pretrained=True)
+        resnet = models.resnet50(pretrained=True)
         self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
+        self.feature_dim=2048
 
         # # Freeze feature extractor
         # for p in self.feature_extractor.parameters():
@@ -136,19 +137,19 @@ class GridClassifier(nn.Module):
 
         # Cross-attention (embed_dim matches ResNet features: 512)
         self.cross_attn = nn.MultiheadAttention(
-            embed_dim=512,
+            embed_dim=self.feature_dim,
             num_heads=8,
             batch_first=True
         )
 
         # Positional encoding (UPDATED): batch-safe + ViT-style init
-        self.pos_embed = nn.Parameter(torch.zeros(1, 100, 512))
+        self.pos_embed = nn.Parameter(torch.zeros(1, 100, self.feature_dim))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
         # No mask needed if you want full attention
         self.attn_mask = None
 
-        self.fc = nn.Linear(512, 100)
+        self.fc = nn.Linear(self.feature_dim, 100)
 
     def forward(self, stitched, basemap):
         # Feature extraction
@@ -160,7 +161,7 @@ class GridClassifier(nn.Module):
 
         # 3x3 local context aggregation per grid cell
         grid_3x3 = F.unfold(grid, kernel_size=3, padding=1)                  # (B,512*9,100)
-        grid_3x3 = grid_3x3.view(grid_3x3.size(0), 512, 9, 100).mean(dim=2)  # (B,512,100)
+        grid_3x3 = grid_3x3.view(grid_3x3.size(0), self.feature_dim, 9, 100).mean(dim=2)  # (B,512,100)
 
         # Attention inputs
         query = F.adaptive_avg_pool2d(stitched_feat, (1, 1)).flatten(1)      # (B,512)
@@ -197,7 +198,7 @@ class FocalLoss(nn.Module):
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '17733'
+    os.environ['MASTER_PORT'] = '10033'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -648,10 +649,10 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--train_fraction', type=float, default=1.0)
     parser.add_argument('--num_epochs', type=int, default=60)
-    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_Variations_1x1")
+    parser.add_argument('--version', type=str, default="9_larger")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--viz_dir', type=str, default="viz_grids")

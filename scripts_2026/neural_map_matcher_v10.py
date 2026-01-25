@@ -24,20 +24,59 @@ import matplotlib.pyplot as plt
 GRID_DIM = 10
 TARGET_BLOCK = 1
 POSITIVE_CELLS = TARGET_BLOCK * TARGET_BLOCK
+ROTATION_DEGREES = (0, 90, 180, 270)
 def perturbation_to_pixel(perturbation, center_x, center_y, pixels_per_meter):
     return (
         center_x - perturbation[1] * pixels_per_meter,
         center_y - perturbation[0] * pixels_per_meter,
     )
 
+def rotate_point_ccw(x, y, width, height, rotation_deg):
+    if rotation_deg == 0:
+        return x, y
+    if rotation_deg == 90:
+        return y, width - 1 - x
+    if rotation_deg == 180:
+        return width - 1 - x, height - 1 - y
+    if rotation_deg == 270:
+        return height - 1 - y, x
+    raise ValueError(f"Unsupported rotation: {rotation_deg}")
+
+def rotate_image_ccw(image, rotation_deg):
+    if rotation_deg == 0:
+        return image
+    if rotation_deg == 90:
+        return image.transpose(Image.ROTATE_90)
+    if rotation_deg == 180:
+        return image.transpose(Image.ROTATE_180)
+    if rotation_deg == 270:
+        return image.transpose(Image.ROTATE_270)
+    raise ValueError(f"Unsupported rotation: {rotation_deg}")
+
 class MapDataset(Dataset):
-    def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
+    def __init__(
+        self,
+        metas_folder,
+        basemap_folder,
+        stitched_folder,
+        transform_base=None,
+        transform_gen=None,
+        rotation_pairs=None,
+        ):
         self.basemap_folder = basemap_folder
         self.stitched_folder = stitched_folder
         self.metas_folder = metas_folder
         self.transform_base = transform_base
         self.transform_gen = transform_gen
-        
+        if rotation_pairs is None:
+            self.rotation_pairs = [
+                (stitched_rot, basemap_rot)
+                for stitched_rot in ROTATION_DEGREES
+                for basemap_rot in ROTATION_DEGREES
+            ]
+        else:
+            self.rotation_pairs = rotation_pairs
+
         stitched_files = os.listdir(stitched_folder)
         self.file_triplets = []
         for stitched_file in stitched_files:
@@ -50,13 +89,16 @@ class MapDataset(Dataset):
                         self.file_triplets.append((stitched_file, basemap_file, metas_file))
 
     def __len__(self):
-        return len(self.file_triplets)
+        return len(self.file_triplets) * len(self.rotation_pairs)
 
     def __getitem__(self, idx):
         # try:
         # import pdb; pdb.set_trace()
-        stitched_file, basemap_file, metas_file = self.file_triplets[idx]
-        
+        base_idx = idx // len(self.rotation_pairs)
+        rotation_idx = idx % len(self.rotation_pairs)
+        stitched_rotation, basemap_rotation = self.rotation_pairs[rotation_idx]
+        stitched_file, basemap_file, metas_file = self.file_triplets[base_idx]
+
         stitched_img_path = os.path.join(self.stitched_folder, stitched_file)
         basemap_img_path = os.path.join(self.basemap_folder, basemap_file)
         metas_path = os.path.join(self.metas_folder, metas_file)
@@ -67,6 +109,9 @@ class MapDataset(Dataset):
         basemap_img = np.array(basemap_img)
         # basemap_img = np.flipud(basemap_img)
         basemap_img = Image.fromarray(basemap_img)
+
+        stitched_img = rotate_image_ccw(stitched_img, stitched_rotation)
+        basemap_img = rotate_image_ccw(basemap_img, basemap_rotation)
 
         if self.transform_gen:
             stitched_img = self.transform_gen(stitched_img)
@@ -89,6 +134,14 @@ class MapDataset(Dataset):
             pixels_per_meter,
         )
         
+        x_val, y_val = rotate_point_ccw(
+            x_val,
+            y_val,
+            basemap_img.shape[2],
+            basemap_img.shape[1],
+            basemap_rotation,
+        )
+
         grid_size = 100  # Each grid is 100x100 pixels
         grid_x = int(x_val // grid_size)
         grid_y = int(y_val // grid_size)
@@ -141,16 +194,14 @@ class GridClassifier(nn.Module):
             batch_first=True
         )
 
-        # Positional encoding for basemap tokens
+        # Positional encoding (UPDATED): batch-safe + ViT-style init
         self.pos_embed = nn.Parameter(torch.zeros(1, 100, 512))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-        # NEW: positional encoding for 5x5 stitched tokens
-        self.stitched_pos_embed = nn.Parameter(torch.zeros(1, 25, 512))
-        nn.init.trunc_normal_(self.stitched_pos_embed, std=0.02)
+        # No mask needed if you want full attention
+        self.attn_mask = None
 
         self.fc = nn.Linear(512, 100)
-
 
     def forward(self, stitched, basemap):
         # Feature extraction
@@ -164,28 +215,23 @@ class GridClassifier(nn.Module):
         grid_3x3 = F.unfold(grid, kernel_size=3, padding=1)                  # (B,512*9,100)
         grid_3x3 = grid_3x3.view(grid_3x3.size(0), 512, 9, 100).mean(dim=2)  # (B,512,100)
 
-        # NEW: stitched -> 5x5 tokens (B,25,512)
-        stitched_tok = F.adaptive_avg_pool2d(stitched_feat, (5, 5))          # (B,512,5,5)
-        stitched_tok = stitched_tok.flatten(2).permute(0, 2, 1)              # (B,25,512)
-        stitched_tok = stitched_tok + self.stitched_pos_embed                # (B,25,512)
+        # Attention inputs
+        query = F.adaptive_avg_pool2d(stitched_feat, (1, 1)).flatten(1)      # (B,512)
+        query = query.unsqueeze(1)                                           # (B,1,512)
 
-        # basemap tokens (B,100,512)
         key_value = grid_3x3.permute(0, 2, 1)                                 # (B,100,512)
         key = value = key_value + self.pos_embed                              # (B,100,512)
 
-        # Cross-attention: 25 queries attend to 100 basemap cells
+        # Cross-attention
         attn_out, _ = self.cross_attn(
-            query=stitched_tok,
-            key=key,
-            value=value
+            query=query,   # (B,1,512)
+            key=key,       # (B,100,512)
+            value=value,   # (B,100,512)
+            attn_mask=self.attn_mask
         )
 
-
-        # Pool the 25 outputs -> one vector, then score 100 cells
-        attn_pooled = attn_out.mean(dim=1)                                   # (B,512)
-        scores = self.fc(attn_pooled)                                        # (B,100)
+        scores = self.fc(attn_out.squeeze(1))  # (B,100)
         return scores
-
 
 
 class FocalLoss(nn.Module):
@@ -204,7 +250,7 @@ class FocalLoss(nn.Module):
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '18933'
+    os.environ['MASTER_PORT'] = '12933'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -655,10 +701,10 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--train_fraction', type=float, default=1.0)
     parser.add_argument('--num_epochs', type=int, default=60)
-    parser.add_argument('--batch_size', type=int, default=24)
+    parser.add_argument('--batch_size', type=int, default=48)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_Variations_1x1")
+    parser.add_argument('--version', type=str, default="10_Augmentations")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--viz_dir', type=str, default="viz_grids")
@@ -691,7 +737,9 @@ def main():
         base_folder+'all_val_metas_v3',
         base_folder+'all_val_basemaps_segmented_v3', 
         base_folder+'all_val_maps_segmented_gt_v3/map/',
-        transform_base, transform_gen
+        transform_base,
+        transform_gen,
+        rotation_pairs=[(0, 0)],
     )
 
     # Model and training setup

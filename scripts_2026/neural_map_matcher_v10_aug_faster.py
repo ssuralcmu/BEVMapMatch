@@ -24,20 +24,59 @@ import matplotlib.pyplot as plt
 GRID_DIM = 10
 TARGET_BLOCK = 1
 POSITIVE_CELLS = TARGET_BLOCK * TARGET_BLOCK
+ROTATION_DEGREES = (0, 90, 180, 270)
 def perturbation_to_pixel(perturbation, center_x, center_y, pixels_per_meter):
     return (
         center_x - perturbation[1] * pixels_per_meter,
         center_y - perturbation[0] * pixels_per_meter,
     )
 
+def rotate_point_ccw(x, y, width, height, rotation_deg):
+    if rotation_deg == 0:
+        return x, y
+    if rotation_deg == 90:
+        return y, width - 1 - x
+    if rotation_deg == 180:
+        return width - 1 - x, height - 1 - y
+    if rotation_deg == 270:
+        return height - 1 - y, x
+    raise ValueError(f"Unsupported rotation: {rotation_deg}")
+
+def rotate_image_ccw(image, rotation_deg):
+    if rotation_deg == 0:
+        return image
+    if rotation_deg == 90:
+        return image.transpose(Image.ROTATE_90)
+    if rotation_deg == 180:
+        return image.transpose(Image.ROTATE_180)
+    if rotation_deg == 270:
+        return image.transpose(Image.ROTATE_270)
+    raise ValueError(f"Unsupported rotation: {rotation_deg}")
+
 class MapDataset(Dataset):
-    def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
+    def __init__(
+        self,
+        metas_folder,
+        basemap_folder,
+        stitched_folder,
+        transform_base=None,
+        transform_gen=None,
+        rotation_pairs=None,
+        ):
         self.basemap_folder = basemap_folder
         self.stitched_folder = stitched_folder
         self.metas_folder = metas_folder
         self.transform_base = transform_base
         self.transform_gen = transform_gen
-        
+        if rotation_pairs is None:
+            self.rotation_pairs = [
+                (stitched_rot, basemap_rot)
+                for stitched_rot in ROTATION_DEGREES
+                for basemap_rot in ROTATION_DEGREES
+            ]
+        else:
+            self.rotation_pairs = rotation_pairs
+
         stitched_files = os.listdir(stitched_folder)
         self.file_triplets = []
         for stitched_file in stitched_files:
@@ -50,13 +89,16 @@ class MapDataset(Dataset):
                         self.file_triplets.append((stitched_file, basemap_file, metas_file))
 
     def __len__(self):
-        return len(self.file_triplets)
+        return len(self.file_triplets) * len(self.rotation_pairs)
 
     def __getitem__(self, idx):
         # try:
         # import pdb; pdb.set_trace()
-        stitched_file, basemap_file, metas_file = self.file_triplets[idx]
-        
+        base_idx = idx // len(self.rotation_pairs)
+        rotation_idx = idx % len(self.rotation_pairs)
+        stitched_rotation, basemap_rotation = self.rotation_pairs[rotation_idx]
+        stitched_file, basemap_file, metas_file = self.file_triplets[base_idx]
+
         stitched_img_path = os.path.join(self.stitched_folder, stitched_file)
         basemap_img_path = os.path.join(self.basemap_folder, basemap_file)
         metas_path = os.path.join(self.metas_folder, metas_file)
@@ -64,9 +106,8 @@ class MapDataset(Dataset):
         stitched_img = Image.open(stitched_img_path).convert('RGB')
         basemap_img = Image.open(basemap_img_path).convert('RGB')
     
-        basemap_img = np.array(basemap_img)
-        # basemap_img = np.flipud(basemap_img)
-        basemap_img = Image.fromarray(basemap_img)
+        stitched_img = rotate_image_ccw(stitched_img, stitched_rotation)
+        basemap_img = rotate_image_ccw(basemap_img, basemap_rotation)
 
         if self.transform_gen:
             stitched_img = self.transform_gen(stitched_img)
@@ -89,6 +130,14 @@ class MapDataset(Dataset):
             pixels_per_meter,
         )
         
+        x_val, y_val = rotate_point_ccw(
+            x_val,
+            y_val,
+            basemap_img.shape[2],
+            basemap_img.shape[1],
+            basemap_rotation,
+        )
+
         grid_size = 100  # Each grid is 100x100 pixels
         grid_x = int(x_val // grid_size)
         grid_y = int(y_val // grid_size)
@@ -197,16 +246,18 @@ class FocalLoss(nn.Module):
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '17733'
+    os.environ['MASTER_PORT'] = '12081'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
     dist.destroy_process_group()
 
-def create_dataloader(rank, world_size, dataset, batch_size=16, num_workers=10):
+def create_dataloader(rank, world_size, dataset, batch_size=16, num_workers=10, prefetch_factor=2):
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler, 
-                     num_workers=num_workers, pin_memory=True)
+                     num_workers=num_workers, pin_memory=True, persistent_workers=True,
+                     prefetch_factor=prefetch_factor)
+
 
 def count_trainable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -437,15 +488,18 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
 
 def train_model(rank, world_size, num_epochs, model, criterion, optimizer, scheduler,
                train_dataset, val_dataset, batch_size, lr, version, fraction, 
-               checkpoint_path, seed):
+               checkpoint_path, seed, validate_every, amp):
     setup(rank, world_size)
     torch.manual_seed(seed)
     np.random.seed(seed)
-    
+    torch.backends.cudnn.benchmark = True
+
     device = torch.device(f'cuda:{rank}')
     model = model.to(device)
     model = DDP(model, device_ids=[rank])
-    
+
+    scaler = torch.cuda.amp.GradScaler(enabled=amp)
+
     # pos_weight = torch.ones(100) * (91 / 9)  # Shape: (100,) and 9 positive out of 100
     # pos_weight = pos_weight.to(device)
     # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -530,11 +584,13 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 optimizer.zero_grad()
                 # import pdb; pdb.set_trace()
 
-                outputs = model(stitched, basemap)
-                loss = criterion(outputs, labels)
-                loss.backward()
+                with torch.cuda.amp.autocast(enabled=amp):
+                    outputs = model(stitched, basemap)
+                    loss = criterion(outputs, labels)
+                scaler.scale(loss).backward()
                 # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': total_loss/(pbar.n+1)})
@@ -575,7 +631,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 torch.save(checkpoint, 'latest_map_location_model_train_'+unique_name+'.pth')
 
             # Validation
-            if epoch % 1 == 0 or epoch==start_epoch:
+            if epoch % validate_every == 0 or epoch == start_epoch:
                 model.eval()
                 val_loss = 0.0
                 correct = 0
@@ -588,8 +644,9 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                         basemap = basemap.to(device)
                         labels = labels.to(device)
                         
-                        outputs = model(stitched, basemap)
-                        val_loss += criterion(outputs, labels).item()
+                        with torch.cuda.amp.autocast(enabled=amp):
+                            outputs = model(stitched, basemap)
+                            val_loss += criterion(outputs, labels).item()
                         if rank == 0:
                             pbar.set_postfix({'val_loss': val_loss / (pbar.n + 1)})
                         # Calculate top-k accuracy
@@ -648,11 +705,13 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--train_fraction', type=float, default=1.0)
     parser.add_argument('--num_epochs', type=int, default=60)
-    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_Variations_1x1")
+    parser.add_argument('--version', type=str, default="10_Augmentations_faster")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
+    parser.add_argument('--validate_every', type=int, default=1)
+    parser.add_argument('--amp', action='store_true', default=True, help="Enable mixed precision training/inference")
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--viz_dir', type=str, default="viz_grids")
     parser.add_argument('--infer_split', type=str, default="val", choices=["train", "val"])
@@ -684,7 +743,9 @@ def main():
         base_folder+'all_val_metas_v3',
         base_folder+'all_val_basemaps_segmented_v3', 
         base_folder+'all_val_maps_segmented_gt_v3/map/',
-        transform_base, transform_gen
+        transform_base,
+        transform_gen,
+        rotation_pairs=[(0, 0)],
     )
 
     # Model and training setup
@@ -729,7 +790,8 @@ def main():
         train_model,
         args=(world_size, args.num_epochs, model, criterion, optimizer, scheduler,
               train_dataset, val_dataset, args.batch_size, args.lr,
-              args.version, args.train_fraction, args.checkpoint, args.seed),
+              args.version, args.train_fraction, args.checkpoint, args.seed,
+              args.validate_every, args.amp),
         nprocs=world_size,
         join=True
     )

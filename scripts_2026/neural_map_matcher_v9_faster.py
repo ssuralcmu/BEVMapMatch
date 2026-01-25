@@ -64,10 +64,6 @@ class MapDataset(Dataset):
         stitched_img = Image.open(stitched_img_path).convert('RGB')
         basemap_img = Image.open(basemap_img_path).convert('RGB')
     
-        basemap_img = np.array(basemap_img)
-        # basemap_img = np.flipud(basemap_img)
-        basemap_img = Image.fromarray(basemap_img)
-
         if self.transform_gen:
             stitched_img = self.transform_gen(stitched_img)
         if self.transform_base:
@@ -197,16 +193,17 @@ class FocalLoss(nn.Module):
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '17733'
+    os.environ['MASTER_PORT'] = '19453'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
     dist.destroy_process_group()
 
-def create_dataloader(rank, world_size, dataset, batch_size=16, num_workers=10):
+def create_dataloader(rank, world_size, dataset, batch_size=16, num_workers=10, prefetch_factor=2):
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler, 
-                     num_workers=num_workers, pin_memory=True)
+                    num_workers=num_workers, pin_memory=True, persistent_workers=True,
+                    prefetch_factor=prefetch_factor)
 
 def count_trainable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -437,15 +434,17 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
 
 def train_model(rank, world_size, num_epochs, model, criterion, optimizer, scheduler,
                train_dataset, val_dataset, batch_size, lr, version, fraction, 
-               checkpoint_path, seed):
+               checkpoint_path, seed, validate_every, amp):
     setup(rank, world_size)
     torch.manual_seed(seed)
     np.random.seed(seed)
-    
+    torch.backends.cudnn.benchmark = True
+
     device = torch.device(f'cuda:{rank}')
     model = model.to(device)
     model = DDP(model, device_ids=[rank])
-    
+    scaler = torch.cuda.amp.GradScaler(enabled=amp)
+
     # pos_weight = torch.ones(100) * (91 / 9)  # Shape: (100,) and 9 positive out of 100
     # pos_weight = pos_weight.to(device)
     # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -530,11 +529,13 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 optimizer.zero_grad()
                 # import pdb; pdb.set_trace()
 
-                outputs = model(stitched, basemap)
-                loss = criterion(outputs, labels)
-                loss.backward()
+                with torch.cuda.amp.autocast(enabled=amp):
+                    outputs = model(stitched, basemap)
+                    loss = criterion(outputs, labels)
+                scaler.scale(loss).backward()
                 # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': total_loss/(pbar.n+1)})
@@ -575,7 +576,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 torch.save(checkpoint, 'latest_map_location_model_train_'+unique_name+'.pth')
 
             # Validation
-            if epoch % 1 == 0 or epoch==start_epoch:
+            if epoch % validate_every == 0 or epoch == start_epoch:
                 model.eval()
                 val_loss = 0.0
                 correct = 0
@@ -588,8 +589,9 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                         basemap = basemap.to(device)
                         labels = labels.to(device)
                         
-                        outputs = model(stitched, basemap)
-                        val_loss += criterion(outputs, labels).item()
+                        with torch.cuda.amp.autocast(enabled=amp):
+                            outputs = model(stitched, basemap)
+                            val_loss += criterion(outputs, labels).item()
                         if rank == 0:
                             pbar.set_postfix({'val_loss': val_loss / (pbar.n + 1)})
                         # Calculate top-k accuracy
@@ -648,12 +650,14 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--train_fraction', type=float, default=1.0)
     parser.add_argument('--num_epochs', type=int, default=60)
-    parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--lr', type=float, default=3e-6)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_Variations_1x1")
+    parser.add_argument('--version', type=str, default="9_faster")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
+    parser.add_argument('--validate_every', type=int, default=1)
+    parser.add_argument('--amp', action='store_true', default=True, help="Enable mixed precision training/inference")
     parser.add_argument('--viz_dir', type=str, default="viz_grids")
     parser.add_argument('--infer_split', type=str, default="val", choices=["train", "val"])
     parser.add_argument('--infer_out', type=str, default="inference_outputs.json")
@@ -729,7 +733,8 @@ def main():
         train_model,
         args=(world_size, args.num_epochs, model, criterion, optimizer, scheduler,
               train_dataset, val_dataset, args.batch_size, args.lr,
-              args.version, args.train_fraction, args.checkpoint, args.seed),
+              args.version, args.train_fraction, args.checkpoint, args.seed,
+              args.validate_every, args.amp),
         nprocs=world_size,
         join=True
     )

@@ -128,8 +128,8 @@ class GridClassifier(nn.Module):
         self.feature_extractor = nn.Sequential(*list(resnet.children())[:-2])
 
         # # Freeze feature extractor
-        # for p in self.feature_extractor.parameters():
-        #     p.requires_grad = False
+        for p in self.feature_extractor.parameters():
+            p.requires_grad = False
 
         # Pool basemap to 10x10
         self.grid_pool = nn.AdaptiveAvgPool2d((10, 10))
@@ -141,14 +141,16 @@ class GridClassifier(nn.Module):
             batch_first=True
         )
 
-        # Positional encoding (UPDATED): batch-safe + ViT-style init
+        # Positional encoding for basemap tokens
         self.pos_embed = nn.Parameter(torch.zeros(1, 100, 512))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-        # No mask needed if you want full attention
-        self.attn_mask = None
+        # NEW: positional encoding for 5x5 stitched tokens
+        self.stitched_pos_embed = nn.Parameter(torch.zeros(1, 25, 512))
+        nn.init.trunc_normal_(self.stitched_pos_embed, std=0.02)
 
         self.fc = nn.Linear(512, 100)
+
 
     def forward(self, stitched, basemap):
         # Feature extraction
@@ -162,23 +164,28 @@ class GridClassifier(nn.Module):
         grid_3x3 = F.unfold(grid, kernel_size=3, padding=1)                  # (B,512*9,100)
         grid_3x3 = grid_3x3.view(grid_3x3.size(0), 512, 9, 100).mean(dim=2)  # (B,512,100)
 
-        # Attention inputs
-        query = F.adaptive_avg_pool2d(stitched_feat, (1, 1)).flatten(1)      # (B,512)
-        query = query.unsqueeze(1)                                           # (B,1,512)
+        # NEW: stitched -> 5x5 tokens (B,25,512)
+        stitched_tok = F.adaptive_avg_pool2d(stitched_feat, (5, 5))          # (B,512,5,5)
+        stitched_tok = stitched_tok.flatten(2).permute(0, 2, 1)              # (B,25,512)
+        stitched_tok = stitched_tok + self.stitched_pos_embed                # (B,25,512)
 
+        # basemap tokens (B,100,512)
         key_value = grid_3x3.permute(0, 2, 1)                                 # (B,100,512)
         key = value = key_value + self.pos_embed                              # (B,100,512)
 
-        # Cross-attention
+        # Cross-attention: 25 queries attend to 100 basemap cells
         attn_out, _ = self.cross_attn(
-            query=query,   # (B,1,512)
-            key=key,       # (B,100,512)
-            value=value,   # (B,100,512)
-            attn_mask=self.attn_mask
+            query=stitched_tok,
+            key=key,
+            value=value
         )
 
-        scores = self.fc(attn_out.squeeze(1))  # (B,100)
+
+        # Pool the 25 outputs -> one vector, then score 100 cells
+        attn_pooled = attn_out.mean(dim=1)                                   # (B,512)
+        scores = self.fc(attn_pooled)                                        # (B,100)
         return scores
+
 
 
 class FocalLoss(nn.Module):
@@ -197,7 +204,7 @@ class FocalLoss(nn.Module):
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '17733'
+    os.environ['MASTER_PORT'] = '18023'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -648,10 +655,10 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--train_fraction', type=float, default=1.0)
     parser.add_argument('--num_epochs', type=int, default=60)
-    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--batch_size', type=int, default=24)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="8_Variations_1x1")
+    parser.add_argument('--version', type=str, default="9_Basic_1x1")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--viz_dir', type=str, default="viz_grids")
@@ -695,7 +702,7 @@ def main():
     criterion=None
 
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
