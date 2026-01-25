@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 GRID_DIM = 10
 TARGET_BLOCK = 1
 POSITIVE_CELLS = TARGET_BLOCK * TARGET_BLOCK
+BASEMAP_INPUT_SIZE = 224
 def perturbation_to_pixel(perturbation, center_x, center_y, pixels_per_meter):
     return (
         center_x - perturbation[1] * pixels_per_meter,
@@ -85,7 +86,7 @@ class MapDataset(Dataset):
             pixels_per_meter,
         )
         
-        grid_size = 100  # Each grid is 100x100 pixels
+        grid_size = basemap_size_px / GRID_DIM
         grid_x = int(x_val // grid_size)
         grid_y = int(y_val // grid_size)
                 
@@ -297,6 +298,7 @@ def visualize_pred_gt_grid(pred_mask_10x10, gt_mask_10x10, save_path):
 
 def visualize_basemap_topk(basemap_path, metas_path, topk_idx, topk_probs, save_path):
     basemap_img = Image.open(basemap_path).convert("RGB")
+    basemap_img = basemap_img.resize((BASEMAP_INPUT_SIZE, BASEMAP_INPUT_SIZE), Image.BILINEAR)
     basemap_np = np.array(basemap_img)
     height, width = basemap_np.shape[0], basemap_np.shape[1]
     cell_width = width / GRID_DIM
@@ -690,7 +692,7 @@ def main():
 
     # Data transforms
     transform_base = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((BASEMAP_INPUT_SIZE, BASEMAP_INPUT_SIZE)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
