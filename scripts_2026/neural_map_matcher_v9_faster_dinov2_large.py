@@ -22,7 +22,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 GRID_DIM = 10
-TARGET_BLOCK = 2
+TARGET_BLOCK = 1
 POSITIVE_CELLS = TARGET_BLOCK * TARGET_BLOCK
 BASEMAP_INPUT_SIZE = 224
 def perturbation_to_pixel(perturbation, center_x, center_y, pixels_per_meter):
@@ -93,6 +93,9 @@ class MapDataset(Dataset):
         grid_dim = GRID_DIM
         target_block = TARGET_BLOCK
     
+        single_cell_label = torch.zeros(grid_dim, grid_dim)
+        single_cell_label[grid_y, grid_x] = 1.0
+
         # Create 10x10 grid mask (2x2 target)
         grid_label = torch.zeros(grid_dim, grid_dim)
 
@@ -106,8 +109,16 @@ class MapDataset(Dataset):
 
         grid_label[i0:i0+target_block, j0:j0+target_block] = 1.0
 
-        return stitched_img, basemap_img, grid_label.flatten().float(), stitched_img_path, basemap_img_path, metas_path
-            
+        return (
+            stitched_img,
+            basemap_img,
+            grid_label.flatten().float(),
+            single_cell_label.flatten().float(),
+            stitched_img_path,
+            basemap_img_path,
+            metas_path,
+        )
+                
         # except Exception as e:
         #     return torch.zeros(3, 100, 100), torch.zeros(3, 1000, 1000), torch.zeros(100), "", "", ""
 
@@ -370,6 +381,8 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
                         num_workers=num_workers, pin_memory=True)
 
     correct_topk = 0
+    exact_top1_correct = 0
+    topk_correct = {1: 0, 2: 0, 3: 0}
     total = 0
     total_iou = 0.0
 
@@ -378,10 +391,11 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
 
     with torch.no_grad():
         pbar = tqdm(loader, desc="Inference")
-        for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
+        for stitched, basemap, labels, single_labels, stitched_img_path, basemap_img_path, metas_path in pbar:
             stitched = stitched.to(device, non_blocking=True)
             basemap = basemap.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)  # (B,100)
+            single_labels = single_labels.to(device, non_blocking=True)
 
             logits = model(stitched, basemap)  # (B,100)
 
@@ -389,6 +403,11 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
             _, topk = torch.topk(logits, POSITIVE_CELLS, dim=1)  # (B,k)
             batch_hits = (labels.gather(1, topk).sum(dim=1) > 0).sum().item()
             correct_topk += batch_hits
+            for k in topk_correct:
+                _, topk_k = torch.topk(logits, k, dim=1)
+                topk_correct[k] += (labels.gather(1, topk_k).sum(dim=1) > 0).sum().item()
+            _, top1_idx = torch.topk(logits, 1, dim=1)
+            exact_top1_correct += (single_labels.gather(1, top1_idx).sum(dim=1) > 0).sum().item()
             total += labels.size(0)
 
             # IoU with top-k predicted indices
@@ -440,9 +459,18 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
 
             avg_acc = correct_topk / max(1, total)
             avg_iou = total_iou / max(1, (pbar.n + 1))
-            pbar.set_postfix({"topk_acc": f"{avg_acc:.3f}", "iou%": f"{avg_iou:.2f}"})
+            avg_topk_acc = {k: topk_correct[k] / max(1, total) for k in topk_correct}
+            avg_exact_top1_acc = exact_top1_correct / max(1, total)
+            pbar.set_postfix({
+                "topk_acc": f"{avg_acc:.3f}",
+                "top1/2/3": f"{avg_topk_acc[1]:.3f}/{avg_topk_acc[2]:.3f}/{avg_topk_acc[3]:.3f}",
+                "exact_top1": f"{avg_exact_top1_acc:.3f}",
+                "iou%": f"{avg_iou:.2f}",
+            })
 
     final_topk = correct_topk / max(1, total)
+    final_topk_acc = {k: topk_correct[k] / max(1, total) for k in topk_correct}
+    final_exact_top1_acc = exact_top1_correct / max(1, total)
     final_iou = total_iou / len(loader)
 
     with open(output_json, "w") as f:
@@ -453,6 +481,11 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
         }, f)
 
     print(f"[Inference] Top-{POSITIVE_CELLS} Acc: {final_topk:.2%}, Mean IoU%: {final_iou:.2f}")
+    print(
+        "[Inference] "
+        f"Top-1/2/3 Acc: {final_topk_acc[1]:.2%}/{final_topk_acc[2]:.2%}/{final_topk_acc[3]:.2%}, "
+        f"Exact Top-1 Acc: {final_exact_top1_acc:.2%}"
+    )
     print(f"[Inference] Saved outputs to: {output_json}")
     if viz:
         print(f"[Inference] Saved visualizations to: {str(viz_dir)}")
@@ -545,14 +578,16 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
             total_loss = 0.0
             correct = 0
             topk_correct = {1: 0, 2: 0, 3: 0}
+            exact_top1_correct = 0
             total = 0
             total_iou = 0.0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", disable=rank != 0)
-            for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
+            for stitched, basemap, labels, single_labels, stitched_img_path, basemap_img_path, metas_path in pbar:
                 stitched = stitched.to(device)
                 basemap = basemap.to(device)
                 labels = labels.to(device)
-                
+                single_labels = single_labels.to(device)
+
                 optimizer.zero_grad()
                 # import pdb; pdb.set_trace()
 
@@ -572,7 +607,10 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 for k in topk_correct:
                     _, topk_k = torch.topk(outputs, k, dim=1)
                     topk_correct[k] += (labels.gather(1, topk_k).sum(dim=1) > 0).sum().item()
-                    
+
+                _, top1_idx = torch.topk(outputs, 1, dim=1)
+                exact_top1_correct += (single_labels.gather(1, top1_idx).sum(dim=1) > 0).sum().item()
+
                 total += labels.size(0)
 
                 # Calculate IOU
@@ -592,6 +630,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
             train_loss = total_loss / len(train_loader)
             train_acc = correct / total
             train_topk_acc = {k: topk_correct[k] / total for k in topk_correct}
+            train_exact_top1_acc = exact_top1_correct / total
             train_iou = total_iou / len(train_loader)
             losses["train"].append([epoch, train_loss, train_acc, train_iou])
 
@@ -613,15 +652,17 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 val_loss = 0.0
                 correct = 0
                 topk_correct = {1: 0, 2: 0, 3: 0}
+                exact_top1_correct = 0
                 total = 0
                 total_iou = 0.0
                 with torch.no_grad():
                     pbar = tqdm(val_loader, desc=f"Validation", disable=rank != 0)
-                    for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
+                    for stitched, basemap, labels, single_labels, stitched_img_path, basemap_img_path, metas_path in pbar:
                         stitched = stitched.to(device)
                         basemap = basemap.to(device)
                         labels = labels.to(device)
-                        
+                        single_labels = single_labels.to(device)
+
                         with torch.cuda.amp.autocast(enabled=amp):
                             outputs = model(stitched, basemap)
                             val_loss += criterion(outputs, labels).item()
@@ -633,7 +674,9 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                         for k in topk_correct:
                             _, topk_k = torch.topk(outputs, k, dim=1)
                             topk_correct[k] += (labels.gather(1, topk_k).sum(dim=1) > 0).sum().item()
-                            
+                        _, top1_idx = torch.topk(outputs, 1, dim=1)
+                        exact_top1_correct += (single_labels.gather(1, top1_idx).sum(dim=1) > 0).sum().item()
+
                         total += labels.size(0)
 
                         # Calculate IOU
@@ -653,6 +696,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 val_loss /= len(val_loader)
                 val_acc = correct / total
                 val_topk_acc = {k: topk_correct[k] / total for k in topk_correct}
+                val_exact_top1_acc = exact_top1_correct / total
                 val_iou = total_iou / len(val_loader)
                 losses["val"].append([epoch, val_loss, val_acc, val_iou])
 
@@ -680,6 +724,10 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                     f"Val Loss: {val_loss:.4f}, Top-{POSITIVE_CELLS} Val Acc: {val_acc:.2%}, "
                     f"Top-1/2/3 Val Acc: {val_topk_acc[1]:.2%}/{val_topk_acc[2]:.2%}/{val_topk_acc[3]:.2%}, "
                     f"Train IoU: {train_iou:.2f}, Val IoU: {val_iou:.2f}"
+                )
+                log_line += (
+                    f", Exact Top-1 Train Acc: {train_exact_top1_acc:.2%}, "
+                    f"Exact Top-1 Val Acc: {val_exact_top1_acc:.2%}"
                 )
                 print(log_line)
                 with open('loss_'+unique_name+'.txt', 'a') as f:
