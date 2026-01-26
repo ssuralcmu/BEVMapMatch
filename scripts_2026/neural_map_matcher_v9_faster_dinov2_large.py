@@ -385,6 +385,7 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
     topk_correct = {1: 0, 2: 0, 3: 0}
     total = 0
     total_iou = 0.0
+    distance_values = []
 
     viz_dir = Path(viz_dir)
     outputs_list = []
@@ -409,6 +410,17 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
             _, top1_idx = torch.topk(logits, 1, dim=1)
             exact_top1_correct += (single_labels.gather(1, top1_idx).sum(dim=1) > 0).sum().item()
             total += labels.size(0)
+
+            pred_idx = top1_idx.squeeze(1)
+            gt_idx = single_labels.argmax(dim=1)
+            pred_row = pred_idx // GRID_DIM
+            pred_col = pred_idx % GRID_DIM
+            gt_row = gt_idx // GRID_DIM
+            gt_col = gt_idx % GRID_DIM
+            distances = torch.sqrt(
+                (pred_row - gt_row).float() ** 2 + (pred_col - gt_col).float() ** 2
+            )
+            distance_values.extend(distances.detach().cpu().tolist())
 
             # IoU with top-k predicted indices
             _, topk_iou = torch.topk(logits, POSITIVE_CELLS, dim=1)  # (B,k)
@@ -453,6 +465,9 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
                     "stitched_img_path": stitched_img_path[b],
                     "basemap_img_path": basemap_img_path[b],
                     "metas_path": metas_path[b],
+                    "pred_idx": pred_idx[b].item(),
+                    "gt_idx": gt_idx[b].item(),
+                    "distance_cells": distances[b].item(),
                     "topk_idx": topk_idx[b],
                     "probs": probs[b],
                 })
@@ -461,11 +476,13 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
             avg_iou = total_iou / max(1, (pbar.n + 1))
             avg_topk_acc = {k: topk_correct[k] / max(1, total) for k in topk_correct}
             avg_exact_top1_acc = exact_top1_correct / max(1, total)
+            avg_distance = sum(distance_values) / max(1, len(distance_values))
             pbar.set_postfix({
                 "topk_acc": f"{avg_acc:.3f}",
                 "top1/2/3": f"{avg_topk_acc[1]:.3f}/{avg_topk_acc[2]:.3f}/{avg_topk_acc[3]:.3f}",
                 "exact_top1": f"{avg_exact_top1_acc:.3f}",
                 "iou%": f"{avg_iou:.2f}",
+                "dist": f"{avg_distance:.2f}",
             })
 
     final_topk = correct_topk / max(1, total)
@@ -473,10 +490,41 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
     final_exact_top1_acc = exact_top1_correct / max(1, total)
     final_iou = total_iou / len(loader)
 
+    mean_distance = sum(distance_values) / max(1, len(distance_values))
+
+    histogram_path = f"{checkpoint_path}_histogram.png"
+    if distance_values:
+        hist_values = np.array(distance_values)
+        unique_distances, counts = np.unique(hist_values, return_counts=True)
+        order = np.argsort(unique_distances)
+        unique_distances = unique_distances[order]
+        counts = counts[order]
+        plt.figure(figsize=(10, 6))
+        bars = plt.bar(range(len(unique_distances)), counts, color="steelblue")
+        labels = [f"{value:.2f}" for value in unique_distances]
+        plt.xticks(range(len(unique_distances)), labels, rotation=45, ha="right")
+        plt.xlabel("Distance (cells)")
+        plt.ylabel("Count")
+        plt.title("Prediction Distance Error Distribution")
+        for bar, count in zip(bars, counts):
+            plt.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                str(int(count)),
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                rotation=90
+            )
+        plt.tight_layout()
+        plt.savefig(histogram_path, dpi=200, bbox_inches="tight")
+        plt.close()
+
     with open(output_json, "w") as f:
         json.dump({
             "topk_acc": final_topk,
             "mean_iou_percent": final_iou,
+            "mean_distance_cells": mean_distance,
             "outputs": outputs_list
         }, f)
 
@@ -486,7 +534,10 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
         f"Top-1/2/3 Acc: {final_topk_acc[1]:.2%}/{final_topk_acc[2]:.2%}/{final_topk_acc[3]:.2%}, "
         f"Exact Top-1 Acc: {final_exact_top1_acc:.2%}"
     )
+    print(f"[Inference] Mean distance (cells): {mean_distance:.2f}")
     print(f"[Inference] Saved outputs to: {output_json}")
+    if distance_values:
+        print(f"[Inference] Saved distance histogram to: {histogram_path}")
     if viz:
         print(f"[Inference] Saved visualizations to: {str(viz_dir)}")
 
