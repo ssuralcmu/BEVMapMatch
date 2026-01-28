@@ -549,6 +549,8 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
     mean_distance = sum(distance_values) / max(1, len(distance_values))
 
     histogram_path = f"{checkpoint_path}_histogram.png"
+    meters_histogram_1m_path = f"{checkpoint_path}_meters_histogram_1m.png"
+    meters_histogram_5m_path = f"{checkpoint_path}_meters_histogram_5m.png"
     if distance_values:
         hist_values = np.array(distance_values)
         unique_distances, counts = np.unique(hist_values, return_counts=True)
@@ -575,6 +577,32 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
         plt.tight_layout()
         plt.savefig(histogram_path, dpi=200, bbox_inches="tight")
         plt.close()
+
+    if meters_error_values:
+        meters_values = np.array(meters_error_values)
+        meters_values_50 = meters_values[meters_values <= 50.0]
+        if meters_values_50.size > 0:
+            bins_1m = np.arange(0, 51 + 1, 1)
+            plt.figure(figsize=(10, 6))
+            plt.hist(meters_values_50, bins=bins_1m, color="seagreen", edgecolor="black")
+            plt.xlabel("Distance Error (meters)")
+            plt.ylabel("Count")
+            plt.title("Distance Error Distribution (1m bins, up to 50m)")
+            plt.tight_layout()
+            plt.savefig(meters_histogram_1m_path, dpi=200, bbox_inches="tight")
+            plt.close()
+
+        max_meter_error = meters_values.max()
+        if max_meter_error > 0:
+            bins_5m = np.arange(0, max_meter_error + 5, 5)
+            plt.figure(figsize=(10, 6))
+            plt.hist(meters_values, bins=bins_5m, color="mediumpurple", edgecolor="black")
+            plt.xlabel("Distance Error (meters)")
+            plt.ylabel("Count")
+            plt.title("Distance Error Distribution (5m bins)")
+            plt.tight_layout()
+            plt.savefig(meters_histogram_5m_path, dpi=200, bbox_inches="tight")
+            plt.close()
 
     with open(output_json, "w") as f:
         json.dump({
@@ -603,6 +631,11 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
     print(f"[Inference] Saved outputs to: {output_json}")
     if distance_values:
         print(f"[Inference] Saved distance histogram to: {histogram_path}")
+    if meters_error_values:
+        if Path(meters_histogram_1m_path).exists():
+            print(f"[Inference] Saved meters histogram (1m bins) to: {meters_histogram_1m_path}")
+        if Path(meters_histogram_5m_path).exists():
+            print(f"[Inference] Saved meters histogram (5m bins) to: {meters_histogram_5m_path}")
     if viz:
         print(f"[Inference] Saved visualizations to: {str(viz_dir)}")
 
