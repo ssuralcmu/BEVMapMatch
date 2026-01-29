@@ -17,6 +17,7 @@ from mmdet3d.datasets import build_dataloader, build_dataset
 from mmdet3d.models import build_model
 import matplotlib.pyplot as plt
 import time
+from pyquaternion import Quaternion
 
 def recursive_eval(obj, globals=None):
     if globals is None:
@@ -169,6 +170,7 @@ def main() -> None:
             # Extract global coordinates
             global_xyz = ego_pose['translation']  # [x, y, z]
 
+            ego_yaw = Quaternion(ego_pose['rotation']).yaw_pitch_roll[0]
 
             # Define the map patch around the ego vehicle
             patch_size = 250  # 500 m x 500 m map
@@ -181,7 +183,9 @@ def main() -> None:
 
             metas['perturbation'] = perturbation
             metas['new_global_xyz'] = global_xyz
-
+            metas['map_patch_angle'] = 0.0
+            metas['map_relative_yaw'] = ego_yaw
+            
             map_masks = build_segmentation_basemap(
                 nusc_map,
                 (global_xyz[0], global_xyz[1]),

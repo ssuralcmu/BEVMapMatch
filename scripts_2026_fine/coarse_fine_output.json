@@ -1,0 +1,38 @@
+{
+  "stitched_image_path": "1531281440800341-08e76760a8c64a92a86686baf68f6aff_generated_map_image.png",
+  "basemap_image_path": "1531281440800341-08e76760a8c64a92a86686baf68f6aff_base_map_image.png",
+  "coarse_top_idx": 84,
+  "crop_box": [
+    300,
+    700,
+    600,
+    1000
+  ],
+  "crop_meters": 150.0,
+  "meters_per_feature_px": 4.6875,
+  "image_pixels_per_feature_px": 14.0,
+  "fine_best_score": [
+    0.0004004209185950458
+  ],
+  "fine_best_angle_deg": [
+    0.0
+  ],
+  "fine_best_shift_x": [
+    0.0
+  ],
+  "fine_best_shift_y": [
+    0.0
+  ],
+  "fine_best_shift_x_pixels": [
+    0.0
+  ],
+  "fine_best_shift_y_pixels": [
+    0.0
+  ],
+  "fine_best_shift_x_meters": [
+    0.0
+  ],
+  "fine_best_shift_y_meters": [
+    0.0
+  ]
+}

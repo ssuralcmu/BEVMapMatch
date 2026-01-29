@@ -94,15 +94,15 @@ class MapDataset(Dataset):
         grid_dim = GRID_DIM
         target_block = TARGET_BLOCK
     
+        # Clamp grid indices to valid range
+        grid_x = int(np.clip(grid_x, 0, grid_dim - 1))
+        grid_y = int(np.clip(grid_y, 0, grid_dim - 1))
+
         single_cell_label = torch.zeros(grid_dim, grid_dim)
         single_cell_label[grid_y, grid_x] = 1.0
 
         # Create 10x10 grid mask (2x2 target)
         grid_label = torch.zeros(grid_dim, grid_dim)
-
-        # Clamp grid indices to valid range
-        grid_x = int(np.clip(grid_x, 0, grid_dim - 1))
-        grid_y = int(np.clip(grid_y, 0, grid_dim - 1))
 
         max_anchor = grid_dim - target_block
         i0 = min(grid_y, max_anchor)  # ensure i0+1 <= 9
@@ -110,20 +110,14 @@ class MapDataset(Dataset):
 
         grid_label[i0:i0+target_block, j0:j0+target_block] = 1.0
 
-        cell_origin_x = grid_x * grid_size
-        cell_origin_y = grid_y * grid_size
-        offset_x = (x_val - cell_origin_x) / grid_size
-        offset_y = (y_val - cell_origin_y) / grid_size
-        offset_x = float(np.clip(offset_x, 0.0, 1.0))
-        offset_y = float(np.clip(offset_y, 0.0, 1.0))
-        offset_target = torch.tensor([offset_x, offset_y], dtype=torch.float32)
+        gt_pixel = torch.tensor([x_val, y_val], dtype=torch.float32)
 
         return (
             stitched_img,
             basemap_img,
             grid_label.flatten().float(),
             single_cell_label.flatten().float(),
-            offset_target,
+            gt_pixel,
             stitched_img_path,
             basemap_img_path,
             metas_path,
@@ -193,7 +187,7 @@ class GridClassifier(nn.Module):
 
         self.fc = nn.Linear(self.embed_dim, 100)
         self.regression_head = nn.Sequential(
-            nn.Linear(self.embed_dim * 2, self.embed_dim),
+            nn.Linear(self.embed_dim, self.embed_dim),
             nn.ReLU(inplace=True),
             nn.Linear(self.embed_dim, 2),
         )
@@ -226,10 +220,8 @@ class GridClassifier(nn.Module):
 
         scores = self.fc(attn_out.squeeze(1))  # (B,100)
 
-        query_expanded = query.expand(-1, 100, -1)  # (B,100,D)
-        regression_input = torch.cat([query_expanded, key_value], dim=-1)  # (B,100,2D)
-        offsets = torch.sigmoid(self.regression_head(regression_input))  # (B,100,2)
-        return scores, offsets
+        deltas = self.regression_head(attn_out.squeeze(1))  # (B,2), in cell units
+        return scores, deltas
 
 
 class FocalLoss(nn.Module):
@@ -275,6 +267,33 @@ def strip_module_prefix(state_dict):
     if first_key.startswith("module."):
         return {k.replace("module.", "", 1): v for k, v in state_dict.items()}
     return state_dict
+
+
+def load_coarse_weights(model, checkpoint_path):
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    state = ckpt.get("model_state_dict", ckpt)
+    state = strip_module_prefix(state)
+    model_state = model.state_dict()
+    filtered = {
+        k: v for k, v in state.items()
+        if k in model_state and v.shape == model_state[k].shape
+    }
+    missing = set(model_state.keys()) - set(filtered.keys())
+    if missing:
+        print(f"[Coarse Load] Skipping {len(missing)} unmatched keys.")
+    model.load_state_dict(filtered, strict=False)
+
+
+def freeze_coarse_backbone(model):
+    for name, param in model.named_parameters():
+        if name.startswith((
+            "feature_extractor",
+            "grid_pool",
+            "cross_attn",
+            "pos_embed",
+            "fc",
+        )):
+            param.requires_grad = False
 
 
 def visualize_pred_gt_grid(pred_mask_10x10, gt_mask_10x10, save_path):
@@ -409,20 +428,21 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
     total_within_5px = 0
     total_within_10px = 0
     meters_error_values = []
+    cell_error_values = []
 
     viz_dir = Path(viz_dir)
     outputs_list = []
 
     with torch.no_grad():
         pbar = tqdm(loader, desc="Inference")
-        for stitched, basemap, labels, single_labels, offset_targets, stitched_img_path, basemap_img_path, metas_path in pbar:
+        for stitched, basemap, labels, single_labels, gt_pixels, stitched_img_path, basemap_img_path, metas_path in pbar:
             stitched = stitched.to(device, non_blocking=True)
             basemap = basemap.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)  # (B,100)
             single_labels = single_labels.to(device, non_blocking=True)
-            offset_targets = offset_targets.to(device, non_blocking=True)
+            gt_pixels = gt_pixels.to(device, non_blocking=True)
 
-            logits, offsets = model(stitched, basemap)  # (B,100), (B,100,2)
+            logits, deltas = model(stitched, basemap)  # (B,100), (B,2)
 
             # Top-k hit accuracy (k matches the number of positives)
             _, topk = torch.topk(logits, POSITIVE_CELLS, dim=1)  # (B,k)
@@ -447,14 +467,15 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
             distance_values.extend(distances.detach().cpu().tolist())
 
             cell_size = BASEMAP_INPUT_SIZE / GRID_DIM
-            pred_offsets = offsets[torch.arange(offsets.size(0), device=device), pred_idx]
-            pred_x = pred_col.float() * cell_size + pred_offsets[:, 0] * cell_size
-            pred_y = pred_row.float() * cell_size + pred_offsets[:, 1] * cell_size
+            pred_center_x = (pred_col.float() + 0.5) * cell_size
+            pred_center_y = (pred_row.float() + 0.5) * cell_size
+            pred_x = pred_center_x + deltas[:, 0] * cell_size
+            pred_y = pred_center_y + deltas[:, 1] * cell_size
 
-            gt_offsets = offset_targets
-            gt_x = gt_col.float() * cell_size + gt_offsets[:, 0] * cell_size
-            gt_y = gt_row.float() * cell_size + gt_offsets[:, 1] * cell_size
+            gt_x = gt_pixels[:, 0]
+            gt_y = gt_pixels[:, 1]
             pixel_error = torch.sqrt((pred_x - gt_x) ** 2 + (pred_y - gt_y) ** 2)
+            cell_error = (pixel_error / cell_size).detach().cpu().tolist()
 
             within_1px = (pixel_error <= 1.0).sum().item()
             within_5px = (pixel_error <= 5.0).sum().item()
@@ -465,6 +486,7 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
             total_within_5px += within_5px
             total_within_10px += within_10px
             meters_error_values.extend(meters_error)
+            cell_error_values.extend(cell_error)
 
             # IoU with top-k predicted indices
             _, topk_iou = torch.topk(logits, POSITIVE_CELLS, dim=1)  # (B,k)
@@ -513,6 +535,7 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
                     "gt_idx": gt_idx[b].item(),
                     "distance_cells": distances[b].item(),
                     "pixel_error": pixel_error[b].item(),
+                    "cell_error": cell_error[b],
                     "meters_error": meters_error[b],
                     "topk_idx": topk_idx[b],
                     "probs": probs[b],
@@ -527,6 +550,7 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
             avg_within_5px = total_within_5px / max(1, total)
             avg_within_10px = total_within_10px / max(1, total)
             avg_meters_error = sum(meters_error_values) / max(1, len(meters_error_values))
+            avg_cell_error = sum(cell_error_values) / max(1, len(cell_error_values))
             pbar.set_postfix({
                 "topk_acc": f"{avg_acc:.3f}",
                 "top1/2/3": f"{avg_topk_acc[1]:.3f}/{avg_topk_acc[2]:.3f}/{avg_topk_acc[3]:.3f}",
@@ -535,6 +559,7 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
                 "dist": f"{avg_distance:.2f}",
                 "px<=1/5/10": f"{avg_within_1px:.2f}/{avg_within_5px:.2f}/{avg_within_10px:.2f}",
                 "m_err": f"{avg_meters_error:.2f}",
+                "cell_err": f"{avg_cell_error:.2f}",
             })
 
     final_topk = correct_topk / max(1, total)
@@ -545,6 +570,7 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
     final_within_5px = total_within_5px / max(1, total)
     final_within_10px = total_within_10px / max(1, total)
     mean_meters_error = sum(meters_error_values) / max(1, len(meters_error_values))
+    mean_cell_error = sum(cell_error_values) / max(1, len(cell_error_values))
 
     mean_distance = sum(distance_values) / max(1, len(distance_values))
 
@@ -613,6 +639,7 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
             "within_5px_acc": final_within_5px,
             "within_10px_acc": final_within_10px,
             "mean_error_meters": mean_meters_error,
+            "mean_error_cells": mean_cell_error,
             "outputs": outputs_list
         }, f)
 
@@ -626,7 +653,8 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
     print(
         "[Inference] "
         f"Pixel Acc<=1/5/10: {final_within_1px:.2%}/{final_within_5px:.2%}/{final_within_10px:.2%}, "
-        f"Mean error (m): {mean_meters_error:.2f}"
+        f"Mean error (m): {mean_meters_error:.2f}, "
+        f"Mean error (cells): {mean_cell_error:.2f}"
     )
     print(f"[Inference] Saved outputs to: {output_json}")
     if distance_values:
@@ -737,22 +765,31 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
             total_within_5px = 0
             total_within_10px = 0
             meters_error_values = []
-            for stitched, basemap, labels, single_labels, offset_targets, stitched_img_path, basemap_img_path, metas_path in pbar:
+            cell_error_values = []
+            for stitched, basemap, labels, single_labels, gt_pixels, stitched_img_path, basemap_img_path, metas_path in pbar:
                 stitched = stitched.to(device)
                 basemap = basemap.to(device)
                 labels = labels.to(device)
                 single_labels = single_labels.to(device)
-                offset_targets = offset_targets.to(device)
+                gt_pixels = gt_pixels.to(device)
 
                 optimizer.zero_grad()
+                gt_idx = single_labels.argmax(dim=1)
                 # import pdb; pdb.set_trace()
 
                 with torch.cuda.amp.autocast(enabled=amp):
-                    outputs, offsets = model(stitched, basemap)
+                    outputs, deltas = model(stitched, basemap)
                     loss_cls = criterion(outputs, labels)
-                    gt_idx = single_labels.argmax(dim=1)
-                    gt_offsets = offsets[torch.arange(offsets.size(0), device=device), gt_idx]
-                    loss_reg = F.smooth_l1_loss(gt_offsets, offset_targets)
+                    pred_idx = outputs.argmax(dim=1)
+                    pred_row = pred_idx // GRID_DIM
+                    pred_col = pred_idx % GRID_DIM
+                    cell_size = BASEMAP_INPUT_SIZE / GRID_DIM
+                    pred_center_x = (pred_col.float() + 0.5) * cell_size
+                    pred_center_y = (pred_row.float() + 0.5) * cell_size
+                    target_delta_x = (gt_pixels[:, 0] - pred_center_x) / cell_size
+                    target_delta_y = (gt_pixels[:, 1] - pred_center_y) / cell_size
+                    target_deltas = torch.stack([target_delta_x, target_delta_y], dim=1)
+                    loss_reg = F.smooth_l1_loss(deltas, target_deltas)
                     loss = loss_cls + REGRESSION_WEIGHT * loss_reg
                 scaler.scale(loss).backward()
                 # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -792,22 +829,23 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 pred_idx = outputs.argmax(dim=1)
                 pred_row = pred_idx // GRID_DIM
                 pred_col = pred_idx % GRID_DIM
-                gt_row = gt_idx // GRID_DIM
-                gt_col = gt_idx % GRID_DIM
 
                 cell_size = BASEMAP_INPUT_SIZE / GRID_DIM
-                pred_offsets = offsets[torch.arange(offsets.size(0), device=device), pred_idx]
-                pred_x = pred_col.float() * cell_size + pred_offsets[:, 0] * cell_size
-                pred_y = pred_row.float() * cell_size + pred_offsets[:, 1] * cell_size
-                gt_x = gt_col.float() * cell_size + offset_targets[:, 0] * cell_size
-                gt_y = gt_row.float() * cell_size + offset_targets[:, 1] * cell_size
+                pred_center_x = (pred_col.float() + 0.5) * cell_size
+                pred_center_y = (pred_row.float() + 0.5) * cell_size
+                pred_x = pred_center_x + deltas[:, 0] * cell_size
+                pred_y = pred_center_y + deltas[:, 1] * cell_size
+                gt_x = gt_pixels[:, 0]
+                gt_y = gt_pixels[:, 1]
                 pixel_error = torch.sqrt((pred_x - gt_x) ** 2 + (pred_y - gt_y) ** 2)
+                cell_error = (pixel_error / cell_size).detach().cpu().tolist()
 
                 total_within_1px += (pixel_error <= 1.0).sum().item()
                 total_within_5px += (pixel_error <= 5.0).sum().item()
                 total_within_10px += (pixel_error <= 10.0).sum().item()
                 pixels_per_meter = BASEMAP_INPUT_SIZE / METERS_PER_PATCH
                 meters_error_values.extend((pixel_error / pixels_per_meter).detach().cpu().tolist())
+                cell_error_values.extend(cell_error)
             
             train_loss = total_loss / len(train_loader)
             train_loss_cls = total_loss_cls / len(train_loader)
@@ -820,6 +858,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
             train_within_5px = total_within_5px / max(1, total)
             train_within_10px = total_within_10px / max(1, total)
             train_mean_meters_error = sum(meters_error_values) / max(1, len(meters_error_values))
+            train_mean_cell_error = sum(cell_error_values) / max(1, len(cell_error_values))
             losses["train"].append([epoch, train_loss, train_acc, train_iou])
 
             if rank == 0:
@@ -851,19 +890,27 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                     total_within_5px = 0
                     total_within_10px = 0
                     meters_error_values = []
-                    for stitched, basemap, labels, single_labels, offset_targets, stitched_img_path, basemap_img_path, metas_path in pbar:
+                    cell_error_values = []
+                    for stitched, basemap, labels, single_labels, gt_pixels, stitched_img_path, basemap_img_path, metas_path in pbar:
                         stitched = stitched.to(device)
                         basemap = basemap.to(device)
                         labels = labels.to(device)
                         single_labels = single_labels.to(device)
-                        offset_targets = offset_targets.to(device)
+                        gt_pixels = gt_pixels.to(device)
 
                         with torch.cuda.amp.autocast(enabled=amp):
-                            outputs, offsets = model(stitched, basemap)
+                            outputs, deltas = model(stitched, basemap)
                             loss_cls = criterion(outputs, labels)
-                            gt_idx = single_labels.argmax(dim=1)
-                            gt_offsets = offsets[torch.arange(offsets.size(0), device=device), gt_idx]
-                            loss_reg = F.smooth_l1_loss(gt_offsets, offset_targets)
+                            pred_idx = outputs.argmax(dim=1)
+                            pred_row = pred_idx // GRID_DIM
+                            pred_col = pred_idx % GRID_DIM
+                            cell_size = BASEMAP_INPUT_SIZE / GRID_DIM
+                            pred_center_x = (pred_col.float() + 0.5) * cell_size
+                            pred_center_y = (pred_row.float() + 0.5) * cell_size
+                            target_delta_x = (gt_pixels[:, 0] - pred_center_x) / cell_size
+                            target_delta_y = (gt_pixels[:, 1] - pred_center_y) / cell_size
+                            target_deltas = torch.stack([target_delta_x, target_delta_y], dim=1)
+                            loss_reg = F.smooth_l1_loss(deltas, target_deltas)
                             val_loss += (loss_cls + REGRESSION_WEIGHT * loss_reg).item()
                             val_loss_cls += loss_cls.item()
                             val_loss_reg += loss_reg.item()
@@ -897,22 +944,23 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                         pred_idx = outputs.argmax(dim=1)
                         pred_row = pred_idx // GRID_DIM
                         pred_col = pred_idx % GRID_DIM
-                        gt_row = gt_idx // GRID_DIM
-                        gt_col = gt_idx % GRID_DIM
 
                         cell_size = BASEMAP_INPUT_SIZE / GRID_DIM
-                        pred_offsets = offsets[torch.arange(offsets.size(0), device=device), pred_idx]
-                        pred_x = pred_col.float() * cell_size + pred_offsets[:, 0] * cell_size
-                        pred_y = pred_row.float() * cell_size + pred_offsets[:, 1] * cell_size
-                        gt_x = gt_col.float() * cell_size + offset_targets[:, 0] * cell_size
-                        gt_y = gt_row.float() * cell_size + offset_targets[:, 1] * cell_size
+                        pred_center_x = (pred_col.float() + 0.5) * cell_size
+                        pred_center_y = (pred_row.float() + 0.5) * cell_size
+                        pred_x = pred_center_x + deltas[:, 0] * cell_size
+                        pred_y = pred_center_y + deltas[:, 1] * cell_size
+                        gt_x = gt_pixels[:, 0]
+                        gt_y = gt_pixels[:, 1]
                         pixel_error = torch.sqrt((pred_x - gt_x) ** 2 + (pred_y - gt_y) ** 2)
+                        cell_error = (pixel_error / cell_size).detach().cpu().tolist()
 
                         total_within_1px += (pixel_error <= 1.0).sum().item()
                         total_within_5px += (pixel_error <= 5.0).sum().item()
                         total_within_10px += (pixel_error <= 10.0).sum().item()
                         pixels_per_meter = BASEMAP_INPUT_SIZE / METERS_PER_PATCH
                         meters_error_values.extend((pixel_error / pixels_per_meter).detach().cpu().tolist())
+                        cell_error_values.extend(cell_error)
                 
                 val_loss /= len(val_loader)
                 val_loss_cls /= len(val_loader)
@@ -925,6 +973,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 val_within_5px = total_within_5px / max(1, total)
                 val_within_10px = total_within_10px / max(1, total)
                 val_mean_meters_error = sum(meters_error_values) / max(1, len(meters_error_values))
+                val_mean_cell_error = sum(cell_error_values) / max(1, len(cell_error_values))
                 losses["val"].append([epoch, val_loss, val_acc, val_iou])
 
                 scheduler.step()
@@ -962,7 +1011,9 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                     f"Train Px<=1/5/10: {train_within_1px:.2%}/{train_within_5px:.2%}/{train_within_10px:.2%}, "
                     f"Val Px<=1/5/10: {val_within_1px:.2%}/{val_within_5px:.2%}/{val_within_10px:.2%}, "
                     f"Train Mean Err (m): {train_mean_meters_error:.2f}, "
-                    f"Val Mean Err (m): {val_mean_meters_error:.2f}"
+                    f"Train Mean Err (cells): {train_mean_cell_error:.2f}, "
+                    f"Val Mean Err (m): {val_mean_meters_error:.2f}, "
+                    f"Val Mean Err (cells): {val_mean_cell_error:.2f}"
                 )
                 print(log_line)
                 with open('loss_'+unique_name+'.txt', 'a') as f:
@@ -985,11 +1036,15 @@ def main():
     parser.add_argument('--version', type=str, default="12_fine")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
-    parser.add_argument('--validate_every', type=int, default=1)
+    parser.add_argument('--validate_every', type=str, default=1)
     parser.add_argument('--amp', action='store_true', default=True, help="Enable mixed precision training/inference")
     parser.add_argument('--viz_dir', type=str, default="viz_grids")
     parser.add_argument('--infer_split', type=str, default="val", choices=["train", "val"])
     parser.add_argument('--infer_out', type=str, default="inference_outputs.json")
+    parser.add_argument('--coarse_checkpoint', type=str, default=None,
+                        help="Optional coarse matcher checkpoint to initialize weights.")
+    parser.add_argument('--freeze_coarse', action='store_true',
+                        help="Freeze coarse matcher layers and train only fine regression head.")
 
     args = parser.parse_args()
 
@@ -1022,6 +1077,12 @@ def main():
 
     # Model and training setup
     model = GridClassifier()
+    if args.coarse_checkpoint:
+        if not os.path.exists(args.coarse_checkpoint):
+            raise ValueError(f"Coarse checkpoint not found: {args.coarse_checkpoint}")
+        load_coarse_weights(model, args.coarse_checkpoint)
+        if args.freeze_coarse:
+            freeze_coarse_backbone(model)
     print("Trainable parameters:", count_trainable_parameters(model))
     print("Total parameters:", count_total_parameters(model))
 

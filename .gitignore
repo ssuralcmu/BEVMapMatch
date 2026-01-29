@@ -36,3 +36,8 @@ scripts_2025/v4_v11_models_results/*
 scripts_2025/analysis/results/*
 
 /scripts_2026/*.pth
+
+/scripts_2026_fine/*.pth
+
+/scripts_2026_fine/viz*
+
