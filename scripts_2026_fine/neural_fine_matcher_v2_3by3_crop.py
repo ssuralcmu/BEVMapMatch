@@ -25,11 +25,55 @@ GRID_DIM = 10
 TARGET_BLOCK = 1
 POSITIVE_CELLS = TARGET_BLOCK * TARGET_BLOCK
 BASEMAP_INPUT_SIZE = 224
+TOP_PRED_CROP_SIZE = 300
 def perturbation_to_pixel(perturbation, center_x, center_y, pixels_per_meter):
     return (
         center_x - perturbation[1] * pixels_per_meter,
         center_y - perturbation[0] * pixels_per_meter,
     )
+
+def compute_top_pred_crop_bounds(width, height, top1_idx):
+    cell_width = width / GRID_DIM
+    cell_height = height / GRID_DIM
+
+    pred_row = int(top1_idx) // GRID_DIM
+    pred_col = int(top1_idx) % GRID_DIM
+
+    row_start = max(0, pred_row - 1)
+    row_end = min(GRID_DIM - 1, pred_row + 1)
+    col_start = max(0, pred_col - 1)
+    col_end = min(GRID_DIM - 1, pred_col + 1)
+
+    left = int(col_start * cell_width)
+    upper = int(row_start * cell_height)
+    right = int((col_end + 1) * cell_width)
+    lower = int((row_end + 1) * cell_height)
+
+    return {
+        "pred_row": pred_row,
+        "pred_col": pred_col,
+        "row_start": row_start,
+        "row_end": row_end,
+        "col_start": col_start,
+        "col_end": col_end,
+        "left": left,
+        "upper": upper,
+        "right": right,
+        "lower": lower,
+        "crop_width": right - left,
+        "crop_height": lower - upper,
+    }
+
+def gt_pixel_from_metas(metas, width, height, meters_per_patch=500.0):
+    center_x, center_y = width / 2.0, height / 2.0
+    pixels_per_meter = width / meters_per_patch
+    gt_x, gt_y = perturbation_to_pixel(
+        metas["perturbation"],
+        center_x,
+        center_y,
+        pixels_per_meter,
+    )
+    return gt_x, gt_y, pixels_per_meter
 
 class MapDataset(Dataset):
     def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
@@ -359,24 +403,11 @@ def visualize_basemap_topk(basemap_path, metas_path, topk_idx, topk_probs, save_
 def save_top_pred_3x3(basemap_path, top1_idx, save_path):
     basemap_img = Image.open(basemap_path).convert("RGB")
     width, height = basemap_img.size
-    cell_width = width / GRID_DIM
-    cell_height = height / GRID_DIM
 
-    pred_row = int(top1_idx) // GRID_DIM
-    pred_col = int(top1_idx) % GRID_DIM
+    crop_info = compute_top_pred_crop_bounds(width, height, top1_idx)
 
-    row_start = max(0, pred_row - 1)
-    row_end = min(GRID_DIM - 1, pred_row + 1)
-    col_start = max(0, pred_col - 1)
-    col_end = min(GRID_DIM - 1, pred_col + 1)
-
-    left = int(col_start * cell_width)
-    upper = int(row_start * cell_height)
-    right = int((col_end + 1) * cell_width)
-    lower = int((row_end + 1) * cell_height)
-
-    cropped = basemap_img.crop((left, upper, right, lower))
-    cropped = cropped.resize((300, 300), Image.BILINEAR)
+    cropped = basemap_img.crop((crop_info["left"], crop_info["upper"], crop_info["right"], crop_info["lower"]))
+    cropped = cropped.resize((TOP_PRED_CROP_SIZE, TOP_PRED_CROP_SIZE), Image.BILINEAR)
 
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -412,6 +443,8 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
     distance_values = []
 
     viz_dir = Path(viz_dir)
+    annotation_dir = viz_dir
+    annotation_dir.mkdir(parents=True, exist_ok=True)
     outputs_list = []
 
     with torch.no_grad():
@@ -492,6 +525,48 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
             topk_idx = topk.detach().cpu().numpy().tolist()
 
             for b in range(labels.size(0)):
+                metas = np.load(metas_path[b], allow_pickle=True).item()
+                with Image.open(basemap_img_path[b]) as basemap_img:
+                    width, height = basemap_img.size
+                gt_x_px, gt_y_px, pixels_per_meter = gt_pixel_from_metas(metas, width, height)
+                gt_x_m = gt_x_px / pixels_per_meter
+                gt_y_m = gt_y_px / pixels_per_meter
+
+                crop_info = compute_top_pred_crop_bounds(width, height, pred_idx[b].item())
+                crop_width = crop_info["crop_width"]
+                crop_height = crop_info["crop_height"]
+                scale_x = TOP_PRED_CROP_SIZE / crop_width if crop_width else 0.0
+                scale_y = TOP_PRED_CROP_SIZE / crop_height if crop_height else 0.0
+                gt_x_top_pred_px = (gt_x_px - crop_info["left"]) * scale_x
+                gt_y_top_pred_px = (gt_y_px - crop_info["upper"]) * scale_y
+
+                sample_id = Path(metas_path[b]).stem
+                annotation_path = annotation_dir / f"{sample_id}_annotation.json"
+                annotation_payload = {
+                    "sample_id": sample_id,
+                    "metas_path": metas_path[b],
+                    "basemap_img_path": basemap_img_path[b],
+                    "gt_xy_meters": [float(gt_x_m), float(gt_y_m)],
+                    "gt_xy_pixels_basemap": [float(gt_x_px), float(gt_y_px)],
+                    "gt_xy_pixels_top_pred_3x3": [float(gt_x_top_pred_px), float(gt_y_top_pred_px)],
+                    "top_pred_cell": int(pred_idx[b].item()),
+                    "gt_cell": int(gt_idx[b].item()),
+                    "distance_cells": float(distances[b].item()),
+                    "top_pred_rowcol": [int(pred_row[b].item()), int(pred_col[b].item())],
+                    "gt_rowcol": [int(gt_row[b].item()), int(gt_col[b].item())],
+                    "top_pred_3x3_crop": {
+                        "left": int(crop_info["left"]),
+                        "upper": int(crop_info["upper"]),
+                        "right": int(crop_info["right"]),
+                        "lower": int(crop_info["lower"]),
+                        "width": int(crop_width),
+                        "height": int(crop_height),
+                        "output_size": [TOP_PRED_CROP_SIZE, TOP_PRED_CROP_SIZE],
+                    },
+                }
+                with open(annotation_path, "w") as f:
+                    json.dump(annotation_payload, f)
+                    
                 outputs_list.append({
                     "stitched_img_path": stitched_img_path[b],
                     "basemap_img_path": basemap_img_path[b],
