@@ -5,7 +5,10 @@ from PIL import Image
 from tqdm import tqdm
 
 folder_name = "viz_dino_best_3x3crop/"
-filename = "1531281698299539-cef5745a54e24c7a9111d449e336b4ed"
+#filename = "1531281698299539-cef5745a54e24c7a9111d449e336b4ed" (WORKS)
+#filename = "1542799754448566-0f3fbd162e444ecd9e3b7136c33deb54" (FAILS)
+#filename = "1542799672147648-8cd233f6da4e4c3685a112be8c6eda2b"
+filename = "1538985019397337-cbaaec205eff4568b512c1697f72102a"
 
 top3by3 = Image.open(folder_name+filename+"_metas_top_pred_3x3.png").convert("RGB")
 genmap  = Image.open(folder_name+filename+"_metas_stitched.png").convert("RGB")
@@ -139,7 +142,7 @@ best_cos, best_ang, (best_cx, best_cy) = best_rot_slide_dinov2(
     pad=100,
     ang_step=5,     # try 10 for faster, 2 for better
     stride=8,       # try 16 for faster, 4 for better
-    batch=64
+    batch=256,
 )
 
 print("BEST:", {"cos": best_cos, "angle_deg": best_ang, "center_xy_in_img1": (best_cx, best_cy)})
@@ -152,4 +155,4 @@ plt.axis("off")
 plt.show()
 
 # write overlay to file
-cv2.imwrite("dinov2_overlay.png", cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+cv2.imwrite(f"{filename}_dinov2_overlay.png", cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
