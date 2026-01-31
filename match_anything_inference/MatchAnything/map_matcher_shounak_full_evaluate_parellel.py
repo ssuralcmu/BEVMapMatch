@@ -1,7 +1,8 @@
 import argparse
 import json
 from pathlib import Path
-
+import multiprocessing as mp
+import os
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,11 +10,17 @@ from tqdm import tqdm
 
 from imcui.ui.utils import get_matcher_zoo, load_config, run_matching
 
+_WORKER_CONTEXT = {}
+
 def imread_rgb(p: Path) -> np.ndarray:
     img_bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
     if img_bgr is None:
         raise FileNotFoundError(f"Could not read image: {p}")
     return img_bgr[:, :, ::-1].copy()  # BGR -> RGB
+
+def center_image0_from_image(image0: np.ndarray):
+    h0, w0 = image0.shape[:2]
+    return (w0 - 1) / 2.0, (h0 - 1) / 2.0
 
 
 def imwrite_rgb(p: Path, img_rgb: np.ndarray) -> None:
@@ -156,6 +163,120 @@ def plot_histograms(distances_m, out_dir: Path):
 
     print(f"Saved histograms to: {hist_1m_path} and {hist_5m_path}")
 
+def init_worker(config_path: str, settings: dict):
+    cfg = load_config(Path(config_path))
+    matcher_zoo = get_matcher_zoo(cfg["matcher_zoo"])
+    _WORKER_CONTEXT["matcher_zoo"] = matcher_zoo
+    _WORKER_CONTEXT["settings"] = settings
+    _WORKER_CONTEXT["ransac_method"] = cfg["defaults"]["ransac_method"]
+    _WORKER_CONTEXT["ransac_confidence"] = cfg["defaults"]["ransac_confidence"]
+    _WORKER_CONTEXT["ransac_max_iter"] = cfg["defaults"]["ransac_max_iter"]
+
+
+def process_pair(pair):
+    """
+    Robust per-pair worker:
+    - never raises (returns {"skipped": (...)} on any error)
+    - records fallback_error for debugging
+    - safe even if run_matching / homography logic fails
+    """
+    base, img0_path, img1_path, annotation_path = pair
+
+    try:
+        # ---- Existence checks ----
+        if not img0_path.exists() or not img1_path.exists():
+            return {"skipped": (base, "missing_images")}
+        if annotation_path is not None and not annotation_path.exists():
+            return {"skipped": (base, "missing_annotation")}
+
+        settings = _WORKER_CONTEXT["settings"]
+
+        # ---- Load images (can throw FileNotFoundError or other I/O issues) ----
+        image0 = imread_rgb(img0_path)
+        image1 = imread_rgb(img1_path)
+
+        fallback_error = None
+
+        # ---- Matching + center mapping ----
+        try:
+            (
+                _output_keypoints,
+                _output_matches_raw,
+                _output_matches_ransac,
+                _num_matches,
+                _configs,
+                _geom_info,
+                _output_wrapped,
+                state_cache,
+                _pkl_path,
+            ) = run_matching(
+                image0=image0,
+                image1=image1,
+                match_threshold=settings["match_threshold"],
+                extract_max_keypoints=settings["max_features"],
+                keypoint_threshold=settings["keypoint_threshold"],
+                key=settings["matcher"],
+                ransac_method=_WORKER_CONTEXT["ransac_method"],
+                ransac_reproj_threshold=settings["ransac_reproj_threshold"],
+                ransac_confidence=_WORKER_CONTEXT["ransac_confidence"],
+                ransac_max_iter=_WORKER_CONTEXT["ransac_max_iter"],
+                choice_geometry_type=settings["geometry"],
+                matcher_zoo=_WORKER_CONTEXT["matcher_zoo"],
+                force_resize=settings["force_resize"],
+                image_width=settings["width"],
+                image_height=settings["height"],
+                use_cached_model=True,
+            )
+
+            # Map center of image1 into image0 via H (with robust invert-if-needed logic)
+            x0, y0 = center_image1_in_image0_from_H(state_cache)
+
+        except cv2.error as exc:
+            # OpenCV threw, use fallback (center of image0) but keep reason
+            fallback_error = f"opencv_error: {exc}"
+            x0, y0 = center_image0_from_image(image0)
+
+        except Exception as exc:
+            # Any other matching-related exception: fallback but keep reason
+            fallback_error = f"matching_exception: {type(exc).__name__}: {exc}"
+            x0, y0 = center_image0_from_image(image0)
+
+        # ---- If no annotation, just return prediction ----
+        if annotation_path is None:
+            return {
+                "result": {
+                    "id": base,
+                    "pred_center_xy": [float(x0), float(y0)],
+                    "distance_px": None,
+                    "distance_m": None,
+                    "fallback_error": fallback_error,
+                }
+            }
+
+        # ---- Load GT + compute distance ----
+        try:
+            gt_x, gt_y = load_annotation(annotation_path, key=settings["annotation_key"])
+        except Exception as exc:
+            return {"skipped": (base, f"bad_annotation: {type(exc).__name__}: {exc}")}
+
+        dist_px = float(np.linalg.norm(np.array([x0, y0], dtype=np.float64) -
+                                       np.array([gt_x, gt_y], dtype=np.float64)))
+        dist_m = dist_px / 2.0
+
+        return {
+            "result": {
+                "id": base,
+                "pred_center_xy": [float(x0), float(y0)],
+                "gt_center_xy": [float(gt_x), float(gt_y)],
+                "distance_px": dist_px,
+                "distance_m": float(dist_m),
+                "fallback_error": fallback_error,
+            }
+        }
+
+    except Exception as exc:
+        # Absolute catch-all so the worker never kills the pool
+        return {"skipped": (base, f"process_pair_exception: {type(exc).__name__}: {exc}")}
 
 def main():
     ap = argparse.ArgumentParser()
@@ -178,11 +299,27 @@ def main():
     ap.add_argument("--force_resize", action="store_true")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=480)
+    ap.add_argument(
+        "--num_workers",
+        type=int,
+        default=min(30, os.cpu_count() or 1),
+        help="Number of multiprocessing workers (default: min(10, cpu_count)).",
+    )
+    ap.add_argument(
+        "--start_method",
+        type=str,
+        default="spawn",
+        choices=("spawn", "fork", "forkserver"),
+        help="Multiprocessing start method.",
+    )
+    ap.add_argument("--pair_timeout_s", type=float, default=60.0,
+                help="Timeout (seconds) per pair. Timed-out pairs are skipped.")
 
     args = ap.parse_args()
 
     repo_root = Path(__file__).resolve().parent
-    cfg = load_config(repo_root / "config" / "config.yaml")
+    config_path = repo_root / "config" / "config.yaml"
+    cfg = load_config(config_path)
     matcher_zoo = get_matcher_zoo(cfg["matcher_zoo"])
 
     # RANSAC defaults come from config.yaml (demo uses these for method/conf/iters;
@@ -206,78 +343,66 @@ def main():
         if not pairs:
             raise FileNotFoundError(f"No image pairs found in {data_dir} with suffix {args.img0_suffix}")
 
-    for base, img0_path, img1_path, annotation_path in tqdm(pairs, desc="Processing pairs"):
-        if not img0_path.exists() or not img1_path.exists():
-            skipped.append((base, "missing_images"))
-            continue
-        if annotation_path is not None and not annotation_path.exists():
-            skipped.append((base, "missing_annotation"))
-            continue
+    settings = {
+        "matcher": args.matcher,
+        "match_threshold": args.match_threshold,
+        "max_features": args.max_features,
+        "keypoint_threshold": args.keypoint_threshold,
+        "geometry": args.geometry,
+        "force_resize": args.force_resize,
+        "width": args.width,
+        "height": args.height,
+        "ransac_reproj_threshold": ransac_reproj_threshold,
+        "annotation_key": args.annotation_key,
+    }
 
-        image0 = imread_rgb(img0_path)
-        image1 = imread_rgb(img1_path)
-
-        fallback_error = None
-        try:
-            (
-                _output_keypoints,
-                _output_matches_raw,
-                _output_matches_ransac,
-                _num_matches,
-                _configs,
-                _geom_info,
-                _output_wrapped,
-                state_cache,
-                _pkl_path,
-            ) = run_matching(
-                image0=image0,
-                image1=image1,
-                match_threshold=args.match_threshold,
-                extract_max_keypoints=args.max_features,
-                keypoint_threshold=args.keypoint_threshold,
-                key=args.matcher,
-                ransac_method=ransac_method,
-                ransac_reproj_threshold=ransac_reproj_threshold,
-                ransac_confidence=ransac_confidence,
-                ransac_max_iter=ransac_max_iter,
-                choice_geometry_type=args.geometry,
-                matcher_zoo=matcher_zoo,
-                force_resize=args.force_resize,
-                image_width=args.width,
-                image_height=args.height,
-                use_cached_model=True,
-            )
-            x0, y0 = center_image1_in_image0_from_H(state_cache)
-        except cv2.error as exc:
-            fallback_error = f"opencv_error: {exc}"
-            x0, y0 = center_image0_from_image(image0)
-
-        if annotation_path is None:
-            results.append(
-                {
-                    "id": base,
-                    "pred_center_xy": [x0, y0],
-                    "distance_px": None,
-                    "distance_m": None,
-                }
-            )
-            continue
-
-        gt_x, gt_y = load_annotation(annotation_path, key=args.annotation_key)
-        dist_px = float(np.linalg.norm(np.array([x0, y0]) - np.array([gt_x, gt_y])))
-        dist_m = dist_px / 2.0
-
-        results.append(
+    if args.num_workers <= 1 or len(pairs) <= 1:
+        _WORKER_CONTEXT.update(
             {
-                "id": base,
-                "pred_center_xy": [x0, y0],
-                "gt_center_xy": [gt_x, gt_y],
-                "distance_px": dist_px,
-                "fallback_error": fallback_error,
-                "distance_m": dist_m,
+                "matcher_zoo": matcher_zoo,
+                "settings": settings,
+                "ransac_method": ransac_method,
+                "ransac_confidence": ransac_confidence,
+                "ransac_max_iter": ransac_max_iter,
             }
         )
 
+        for pair in tqdm(pairs, desc="Processing pairs"):
+            outcome = process_pair(pair)
+            if "skipped" in outcome:
+                skipped.append(outcome["skipped"])
+            else:
+                results.append(outcome["result"])
+
+    else:
+        ctx = mp.get_context(args.start_method)
+        with ctx.Pool(
+            processes=args.num_workers,
+            initializer=init_worker,
+            initargs=(str(config_path), settings),
+        ) as pool:
+
+            # submit all jobs
+            jobs = [(pair[0], pool.apply_async(process_pair, (pair,))) for pair in pairs]
+
+            # collect with timeout per job
+            for base, job in tqdm(jobs, total=len(jobs), desc="Processing pairs"):
+                try:
+                    outcome = job.get(timeout=args.pair_timeout_s)
+                except mp.context.TimeoutError:
+                    skipped.append((base, f"timeout>{args.pair_timeout_s}s"))
+                    continue
+                except Exception as e:
+                    skipped.append((base, f"worker_exception: {type(e).__name__}: {e}"))
+                    continue
+
+                if "skipped" in outcome:
+                    skipped.append(outcome["skipped"])
+                else:
+                    results.append(outcome["result"])
+
+                    
+                    
     results_path = out_dir / "distance_errors.json"
     with results_path.open("w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
