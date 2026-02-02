@@ -140,8 +140,8 @@ def main() -> None:
 
             name = "{}-{}".format(metas["timestamp"], metas["token"])
 
-            save_path = 'all_val_basemaps_segmented_v3/'+name+"_base_map_image.png"  # Change this to your desired save location
-            metas_save_path = 'all_val_metas_v3/'+name+"_metas.npy"  # Change this to your desired save
+            save_path = 'all_val_basemaps_segmented_v3_modelpred/'+name+"_base_map_image.png"  # Change this to your desired save location
+            metas_save_path = 'all_val_metas_v3_modelpred/'+name+"_metas.npy"  # Change this to your desired save
             #Make directory if it does not exist
             # os.makedirs(os.path.dirname(save_path), exist_ok=True)
             #Check if file already exists

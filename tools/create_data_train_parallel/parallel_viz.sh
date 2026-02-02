@@ -6,3 +6,11 @@ torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_g
 torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_get_gps_train_data_gt_with_gps_perturb_slice_generic.py configs/nuscenes/seg/fusion-bev256d2-lss.yaml --mode gt --split train --out-dir all_train_maps_segmented_gt_v3 --start-idx 100000 --end-idx 125000
 
 torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_get_gps_val_data_gt_with_gps_perturb_slice_generic.py configs/nuscenes/seg/fusion-bev256d2-lss.yaml --mode gt --split val --out-dir all_val_maps_segmented_gt_v3 --start-idx 0 --end-idx 7000
+
+
+
+torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_get_gps_train_data_gt_with_gps_perturb_slice_generic.py configs/nuscenes/seg/fusion-bev256d2-lss.yaml --mode pred --split train --out-dir all_train_maps_segmented_gt_v3_modelpred --start-idx 0 --end-idx 40000 --checkpoint pretrained/bevfusion-seg.pth
+torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_get_gps_train_data_gt_with_gps_perturb_slice_generic.py configs/nuscenes/seg/fusion-bev256d2-lss.yaml --mode pred --split train --out-dir all_train_maps_segmented_gt_v3_modelpred --start-idx 40000 --end-idx 80000 --checkpoint pretrained/bevfusion-seg.pth
+CUDA_VISIBLE_DEVICES=1 torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_get_gps_train_data_gt_with_gps_perturb_slice_generic.py configs/nuscenes/seg/fusion-bev256d2-lss.yaml --mode pred --split train --out-dir all_train_maps_segmented_gt_v3_modelpred --start-idx 80000 --end-idx 125000 --checkpoint pretrained/bevfusion-seg.pth
+
+CUDA_VISIBLE_DEVICES=1 torchpack dist-run -np 1 python tools/create_data_train_parallel/visualize_and_get_gps_val_data_gt_with_gps_perturb_slice_generic.py configs/nuscenes/seg/fusion-bev256d2-lss.yaml --mode pred --split val --out-dir all_val_maps_segmented_gt_v3_modelpred --start-idx 0 --end-idx 7000 --checkpoint pretrained/bevfusion-seg.pth
