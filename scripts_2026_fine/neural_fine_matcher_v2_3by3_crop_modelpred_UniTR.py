@@ -82,18 +82,64 @@ class MapDataset(Dataset):
         self.metas_folder = metas_folder
         self.transform_base = transform_base
         self.transform_gen = transform_gen
-        
+
+        basemap_files = [f for f in os.listdir(basemap_folder) if f.endswith("_base_map_image.png")]
+        metas_files = [f for f in os.listdir(metas_folder) if f.endswith("_metas.npy")]
+
+        basemap_index = self._build_suffix_index(basemap_files, "_base_map_image.png")
+        metas_index = self._build_suffix_index(metas_files, "_metas.npy")
+
         stitched_files = os.listdir(stitched_folder)
         self.file_triplets = []
         for stitched_file in stitched_files:
             if stitched_file.endswith("_generated_map_image.png"):
-                prefix = stitched_file.split("_generated_map_image.png")[0]
-                basemap_file = f"{prefix}_base_map_image.png"
-                metas_file = f"{prefix}_metas.npy"
-                if os.path.exists(os.path.join(basemap_folder, basemap_file)):
-                    if os.path.exists(os.path.join(metas_folder, metas_file)):
-                        self.file_triplets.append((stitched_file, basemap_file, metas_file))
+                stitched_key = stitched_file[:-len("_generated_map_image.png")]
+            elif stitched_file.endswith(".png"):
+                stitched_key = os.path.splitext(stitched_file)[0]
+            else:
+                continue
 
+            basemap_file = self._resolve_file(stitched_key, basemap_index)
+            metas_file = self._resolve_file(stitched_key, metas_index)
+
+            if basemap_file is not None and metas_file is not None:
+                self.file_triplets.append((stitched_file, basemap_file, metas_file))
+
+    @staticmethod
+    def _build_suffix_index(files, suffix):
+        index = {}
+        for file_name in files:
+            if not file_name.endswith(suffix):
+                continue
+
+            full_prefix = file_name[:-len(suffix)]
+            short_prefix = full_prefix.split("-")[-1]
+
+            index.setdefault(full_prefix, []).append(file_name)
+            if short_prefix != full_prefix:
+                index.setdefault(short_prefix, []).append(file_name)
+        return index
+
+    @staticmethod
+    def _resolve_file(stitched_key, index):
+        matches = index.get(stitched_key, [])
+        if len(matches) == 1:
+            return matches[0]
+
+        stitched_suffix = stitched_key.split("-")[-1]
+        suffix_matches = [
+            match for match in matches
+            if match.split("-")[-1].startswith(stitched_suffix)
+        ]
+        if len(suffix_matches) == 1:
+            return suffix_matches[0]
+
+        fallback_matches = index.get(stitched_suffix, [])
+        if len(fallback_matches) == 1:
+            return fallback_matches[0]
+
+        return None
+    
     def __len__(self):
         return len(self.file_triplets)
 
@@ -909,7 +955,7 @@ def main():
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--validate_every', type=int, default=1)
     parser.add_argument('--amp', action='store_true', default=True, help="Enable mixed precision training/inference")
-    parser.add_argument('--viz_dir', type=str, default="viz_dino_best_3x3crop_modelpred")
+    parser.add_argument('--viz_dir', type=str, default="viz_dino_best_3x3crop_modelpred_unitr", help="Directory to save visualizations if --viz is enabled")
     parser.add_argument('--infer_split', type=str, default="val", choices=["train", "val"])
     parser.add_argument('--infer_out', type=str, default="inference_outputs.json")
 
@@ -932,13 +978,13 @@ def main():
     train_dataset = MapDataset(
         base_folder+'all_train_metas_v3_modelpred',
         base_folder+'all_train_basemaps_segmented_v3_modelpred',
-        base_folder+'all_train_maps_segmented_gt_v3_modelpred/map/',
+        base_folder+'all_train_maps_segmented_v3_modelpred_UNITR',
         transform_base, transform_gen
     )
     val_dataset = MapDataset(
         base_folder+'all_val_metas_v3_modelpred',
         base_folder+'all_val_basemaps_segmented_v3_modelpred', 
-        base_folder+'all_val_maps_segmented_gt_v3_modelpred/map/',
+        base_folder+'all_val_maps_segmented_v3_modelpred_UNITR',
         transform_base, transform_gen
     )
 
