@@ -114,8 +114,8 @@ class MapDataset(Dataset):
             if key in metas:
                 value = metas[key]
                 if isinstance(value, (int, float, np.integer, np.floating)):
-                    return float(value)
-
+                    return MapDataset._normalize_timestamp_seconds(float(value))
+                
         sec_val, nsec_val = None, None
         for key in ["timestamp_sec", "time_sec", "sec", "seconds"]:
             if key in metas and isinstance(metas[key], (int, float, np.integer, np.floating)):
@@ -131,6 +131,18 @@ class MapDataset(Dataset):
 
         return None
 
+    @staticmethod
+    def _normalize_timestamp_seconds(timestamp):
+        """Convert epoch timestamps in ns/us/ms/sec to seconds."""
+        ts = abs(float(timestamp))
+        if ts >= 1e17:  # nanoseconds
+            return float(timestamp) * 1e-9
+        if ts >= 1e14:  # microseconds
+            return float(timestamp) * 1e-6
+        if ts >= 1e11:  # milliseconds
+            return float(timestamp) * 1e-3
+        return float(timestamp)
+    
     @staticmethod
     def _extract_sequence_id(stitched_file, metas):
         for key in ["scene_id", "sequence_id", "log_id", "route_id", "trip_id"]:
@@ -154,20 +166,27 @@ class MapDataset(Dataset):
                 "sequence_id": sequence_id,
             })
 
-        sequence_to_indices = {}
-        for idx, entry in enumerate(entries):
-            sequence_to_indices.setdefault(entry["sequence_id"], []).append(idx)
+        timestamped_entries = sorted(
+            (entry["timestamp"], idx)
+            for idx, entry in enumerate(entries)
+            if entry["timestamp"] is not None
+        )
+        sorted_pos_by_idx = {
+            sample_idx: pos for pos, (_, sample_idx) in enumerate(timestamped_entries)
+        }
 
         for idx, entry in enumerate(entries):
             best_idx = idx
             best_dt = math.inf
-            if entry["timestamp"] is not None:
-                for cand_idx in sequence_to_indices.get(entry["sequence_id"], []):
-                    if cand_idx == idx:
+            if entry["timestamp"] is not None and idx in sorted_pos_by_idx:
+                cur_pos = sorted_pos_by_idx[idx]
+                candidate_positions = [cur_pos - 1, cur_pos + 1]
+
+                for cand_pos in candidate_positions:
+                    if cand_pos < 0 or cand_pos >= len(timestamped_entries):
                         continue
-                    cand_ts = entries[cand_idx]["timestamp"]
-                    if cand_ts is None:
-                        continue
+                    cand_ts, cand_idx = timestamped_entries[cand_pos]
+                    
                     dt = abs(cand_ts - entry["timestamp"])
                     if dt <= self.neighbor_window_s and dt < best_dt:
                         best_dt = dt
@@ -185,6 +204,8 @@ class MapDataset(Dataset):
         for idx, entry in enumerate(self.sample_entries):
             if entry["timestamp"] is not None:
                 with_timestamp += 1
+                if idx%100 == 0:
+                    print(f"Sample {idx}/{total_samples}: timestamp={entry['timestamp']}, neighbor_idx={entry['neighbor_idx']}, neighbor_timestamp={self.sample_entries[entry['neighbor_idx']]['timestamp'] if entry['neighbor_idx'] != idx else 'N/A'}")
 
             if entry["neighbor_idx"] == idx:
                 fallback_to_self += 1
@@ -989,7 +1010,7 @@ def main():
     )
     train_dataset.print_neighbor_stats("train")
     val_dataset.print_neighbor_stats("val")
-    
+
     # Model and training setup
     model = GridClassifier()
     print("Trainable parameters:", count_trainable_parameters(model))
