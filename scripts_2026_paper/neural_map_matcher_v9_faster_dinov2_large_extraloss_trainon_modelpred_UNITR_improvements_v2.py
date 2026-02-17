@@ -222,9 +222,6 @@ class GridClassifier(nn.Module):
         # Option A: temperature / logit scale (learnable)
         self.logit_scale = nn.Parameter(torch.tensor(float(init_logit_scale)))
 
-        # Note: we keep self.fc for backwards compatibility if you want to compare,
-        # but it is not used in forward for Option A.
-        self.fc = nn.Linear(self.embed_dim, 100)
 
     def forward(self, stitched: torch.Tensor, basemap: torch.Tensor) -> torch.Tensor:
         # Feature extraction

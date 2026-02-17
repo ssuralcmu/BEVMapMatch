@@ -17,7 +17,7 @@ import json
 import argparse
 from torchvision.ops import sigmoid_focal_loss
 from transformers import AutoModel
-
+import math
 from pathlib import Path
 import matplotlib.pyplot as plt
 
@@ -32,7 +32,7 @@ def perturbation_to_pixel(perturbation, center_x, center_y, pixels_per_meter):
     )
 
 class MapDataset(Dataset):
-    def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
+    def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None, neighbor_window_s=2.0):
         self.basemap_folder = basemap_folder
         self.stitched_folder = stitched_folder
         self.metas_folder = metas_folder
@@ -60,6 +60,10 @@ class MapDataset(Dataset):
 
             if basemap_file is not None and metas_file is not None:
                 self.file_triplets.append((stitched_file, basemap_file, metas_file))
+
+        self.neighbor_window_s = float(neighbor_window_s)
+        self.sample_entries = self._build_sample_entries()
+        self.neighbor_stats = self._summarize_neighbor_matches()
 
     @staticmethod
     def _build_suffix_index(files, suffix):
@@ -95,24 +99,144 @@ class MapDataset(Dataset):
             return fallback_matches[0]
 
         return None
-    
-    def __len__(self):
-        return len(self.file_triplets)
 
+    @staticmethod
+    def _extract_timestamp_from_metas(metas):
+        for key in [
+            "timestamp",
+            "timestamp_sec",
+            "time_stamp",
+            "time",
+            "ts",
+            "frame_timestamp",
+            "sample_timestamp",
+        ]:
+            if key in metas:
+                value = metas[key]
+                if isinstance(value, (int, float, np.integer, np.floating)):
+                    return float(value)
+
+        sec_val, nsec_val = None, None
+        for key in ["timestamp_sec", "time_sec", "sec", "seconds"]:
+            if key in metas and isinstance(metas[key], (int, float, np.integer, np.floating)):
+                sec_val = float(metas[key])
+                break
+        for key in ["timestamp_nsec", "time_nsec", "nsec", "nanoseconds"]:
+            if key in metas and isinstance(metas[key], (int, float, np.integer, np.floating)):
+                nsec_val = float(metas[key])
+                break
+
+        if sec_val is not None and nsec_val is not None:
+            return sec_val + nsec_val * 1e-9
+
+        return None
+
+    @staticmethod
+    def _extract_sequence_id(stitched_file, metas):
+        for key in ["scene_id", "sequence_id", "log_id", "route_id", "trip_id"]:
+            if key in metas:
+                return str(metas[key])
+        stem = Path(stitched_file).stem
+        return stem.rsplit("-", 1)[0] if "-" in stem else stem
+
+    def _build_sample_entries(self):
+        entries = []
+        for stitched_file, basemap_file, metas_file in self.file_triplets:
+            metas_path = os.path.join(self.metas_folder, metas_file)
+            metas = np.load(metas_path, allow_pickle=True).item()
+            timestamp = self._extract_timestamp_from_metas(metas)
+            sequence_id = self._extract_sequence_id(stitched_file, metas)
+            entries.append({
+                "stitched_file": stitched_file,
+                "basemap_file": basemap_file,
+                "metas_file": metas_file,
+                "timestamp": timestamp,
+                "sequence_id": sequence_id,
+            })
+
+        sequence_to_indices = {}
+        for idx, entry in enumerate(entries):
+            sequence_to_indices.setdefault(entry["sequence_id"], []).append(idx)
+
+        for idx, entry in enumerate(entries):
+            best_idx = idx
+            best_dt = math.inf
+            if entry["timestamp"] is not None:
+                for cand_idx in sequence_to_indices.get(entry["sequence_id"], []):
+                    if cand_idx == idx:
+                        continue
+                    cand_ts = entries[cand_idx]["timestamp"]
+                    if cand_ts is None:
+                        continue
+                    dt = abs(cand_ts - entry["timestamp"])
+                    if dt <= self.neighbor_window_s and dt < best_dt:
+                        best_dt = dt
+                        best_idx = cand_idx
+            entry["neighbor_idx"] = best_idx
+
+        return entries
+
+    def _summarize_neighbor_matches(self):
+        total_samples = len(self.sample_entries)
+        with_timestamp = 0
+        matched_within_window = 0
+        fallback_to_self = 0
+
+        for idx, entry in enumerate(self.sample_entries):
+            if entry["timestamp"] is not None:
+                with_timestamp += 1
+
+            if entry["neighbor_idx"] == idx:
+                fallback_to_self += 1
+            else:
+                matched_within_window += 1
+
+        matched_ratio = (matched_within_window / total_samples * 100.0) if total_samples > 0 else 0.0
+        return {
+            "total_samples": total_samples,
+            "with_timestamp": with_timestamp,
+            "matched_within_window": matched_within_window,
+            "fallback_to_self": fallback_to_self,
+            "matched_ratio": matched_ratio,
+            "neighbor_window_s": self.neighbor_window_s,
+        }
+
+    def print_neighbor_stats(self, split_name):
+        stats = self.neighbor_stats
+        print(
+            f"[{split_name}] Neighbor-match stats: "
+            f"matched={stats['matched_within_window']}/{stats['total_samples']} "
+            f"({stats['matched_ratio']:.2f}%), "
+            f"fallback_self={stats['fallback_to_self']}, "
+            f"timestamp_available={stats['with_timestamp']}/{stats['total_samples']}, "
+            f"window={stats['neighbor_window_s']:.2f}s"
+        )
+
+    def __len__(self):
+        return len(self.sample_entries)
+    
     def __getitem__(self, idx):
-        # try:
-        # import pdb; pdb.set_trace()
-        stitched_file, basemap_file, metas_file = self.file_triplets[idx]
-        
+        current_entry = self.sample_entries[idx]
+        neighbor_entry = self.sample_entries[current_entry["neighbor_idx"]]
+
+        stitched_file = current_entry["stitched_file"]
+        basemap_file = current_entry["basemap_file"]
+        metas_file = current_entry["metas_file"]
+        neighbor_stitched_file = neighbor_entry["stitched_file"]
+
         stitched_img_path = os.path.join(self.stitched_folder, stitched_file)
+        neighbor_stitched_img_path = os.path.join(self.stitched_folder, neighbor_stitched_file)
+
         basemap_img_path = os.path.join(self.basemap_folder, basemap_file)
         metas_path = os.path.join(self.metas_folder, metas_file)
 
         stitched_img = Image.open(stitched_img_path).convert('RGB')
+        neighbor_stitched_img = Image.open(neighbor_stitched_img_path).convert('RGB')
         basemap_img = Image.open(basemap_img_path).convert('RGB')
     
         if self.transform_gen:
             stitched_img = self.transform_gen(stitched_img)
+            neighbor_stitched_img = self.transform_gen(neighbor_stitched_img)
         if self.transform_base:
             basemap_img = self.transform_base(basemap_img)
 
@@ -152,11 +276,17 @@ class MapDataset(Dataset):
 
         grid_label[i0:i0+target_block, j0:j0+target_block] = 1.0
 
-        return stitched_img, basemap_img, grid_label.flatten().float(), stitched_img_path, basemap_img_path, metas_path
-            
-        # except Exception as e:
-        #     return torch.zeros(3, 100, 100), torch.zeros(3, 1000, 1000), torch.zeros(100), "", "", ""
-
+        return (
+            stitched_img,
+            neighbor_stitched_img,
+            basemap_img,
+            grid_label.flatten().float(),
+            stitched_img_path,
+            neighbor_stitched_img_path,
+            basemap_img_path,
+            metas_path,
+        )
+    
 class DINOv2Backbone(nn.Module):
     """
     DINOv2 via HuggingFace (py3.8 friendly).
@@ -247,6 +377,16 @@ class GridClassifier(nn.Module):
         scores = self.fc(attn_out.squeeze(1))  # (B,100)
         return scores
 
+    def forward_dual(self, stitched_a, stitched_b, basemap):
+        logits_a = self.forward(stitched_a, basemap)
+        logits_b = self.forward(stitched_b, basemap)
+
+        confidence_a = torch.abs(logits_a)
+        confidence_b = torch.abs(logits_b)
+        use_a = confidence_a >= confidence_b
+        fused_logits = torch.where(use_a, logits_a, logits_b)
+        return fused_logits, logits_a, logits_b
+
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=0.9, gamma=2.5):
@@ -291,7 +431,7 @@ def soft_cross_entropy(logits, soft_targets):
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12010'
+    os.environ['MASTER_PORT'] = '12510'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -451,12 +591,13 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
 
     with torch.no_grad():
         pbar = tqdm(loader, desc="Inference")
-        for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
+        for stitched, stitched_neighbor, basemap, labels, stitched_img_path, stitched_neighbor_img_path, basemap_img_path, metas_path in pbar:
             stitched = stitched.to(device, non_blocking=True)
+            stitched_neighbor = stitched_neighbor.to(device, non_blocking=True)
             basemap = basemap.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)  # (B,100)
 
-            logits = model(stitched, basemap)  # (B,100)
+            logits, logits_current, logits_neighbor = model.forward_dual(stitched, stitched_neighbor, basemap)  # (B,100)
 
             # Top-k hit accuracy (k matches the number of positives)
             _, topk = torch.topk(logits, POSITIVE_CELLS, dim=1)  # (B,k)
@@ -498,6 +639,10 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
                     stitched_save_path.parent.mkdir(parents=True, exist_ok=True)
                     stitched_img.save(stitched_save_path)
 
+                    stitched_neighbor_save_path = viz_dir / f"{sample_id}_stitched_neighbor.png"
+                    stitched_neighbor_img = Image.open(stitched_neighbor_img_path[b]).convert("RGB")
+                    stitched_neighbor_img.save(stitched_neighbor_save_path)
+
             # Save raw outputs (optional but useful)
             probs = torch.sigmoid(logits).detach().cpu().numpy().tolist()
             topk_idx = topk.detach().cpu().numpy().tolist()
@@ -505,11 +650,14 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
             for b in range(labels.size(0)):
                 outputs_list.append({
                     "stitched_img_path": stitched_img_path[b],
+                    "stitched_neighbor_img_path": stitched_neighbor_img_path[b],                                        
                     "basemap_img_path": basemap_img_path[b],
                     "metas_path": metas_path[b],
                     "topk_idx": topk_idx[b],
                     "probs": probs[b],
-                })
+                    "probs_current": torch.sigmoid(logits_current[b]).detach().cpu().numpy().tolist(),
+                    "probs_neighbor": torch.sigmoid(logits_neighbor[b]).detach().cpu().numpy().tolist(),
+              })
 
             avg_acc = correct_topk / max(1, total)
             avg_iou = total_iou / max(1, (pbar.n + 1))
@@ -623,8 +771,9 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
             total = 0
             total_iou = 0.0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", disable=rank != 0)
-            for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
+            for stitched, stitched_neighbor, basemap, labels, stitched_img_path, stitched_neighbor_img_path, basemap_img_path, metas_path in pbar:
                 stitched = stitched.to(device)
+                stitched_neighbor = stitched_neighbor.to(device)
                 basemap = basemap.to(device)
                 labels = labels.to(device)
                 
@@ -632,7 +781,7 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 # import pdb; pdb.set_trace()
 
                 with torch.cuda.amp.autocast(enabled=amp):
-                    outputs = model(stitched, basemap)
+                    outputs, _, _ = model.module.forward_dual(stitched, stitched_neighbor, basemap)
                     loss = criterion(outputs, labels)
 
                     if distance_loss_weight > 0:
@@ -701,13 +850,15 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 total_iou = 0.0
                 with torch.no_grad():
                     pbar = tqdm(val_loader, desc=f"Validation", disable=rank != 0)
-                    for stitched, basemap, labels, stitched_img_path, basemap_img_path, metas_path in pbar:
+                    for stitched, stitched_neighbor, basemap, labels, stitched_img_path, stitched_neighbor_img_path, basemap_img_path, metas_path in pbar:
                         stitched = stitched.to(device)
+                        stitched_neighbor = stitched_neighbor.to(device)
                         basemap = basemap.to(device)
                         labels = labels.to(device)
                         
                         with torch.cuda.amp.autocast(enabled=amp):
                             outputs = model(stitched, basemap)
+                            outputs, _, _ = model.module.forward_dual(stitched, stitched_neighbor, basemap)
                             base_loss = criterion(outputs, labels)
                             loss = base_loss
                             if distance_loss_weight > 0:
@@ -791,7 +942,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--version', type=str, default="9_dinov2_extraloss_wt0point1")
+    parser.add_argument('--version', type=str, default="2frames")
     parser.add_argument('--mode', type=str, default="train", choices=["train", "infer"])
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--validate_every', type=int, default=1)
@@ -803,7 +954,9 @@ def main():
                         help="Weight for distance-aware soft target loss.")
     parser.add_argument('--distance_sigma', type=float, default=0.8,
                         help="Gaussian sigma (grid cells) for distance-aware loss.")
-    
+    parser.add_argument('--neighbor_window_s', type=float, default=2.0,
+                        help="Max time delta in seconds for choosing second stitched map.")
+        
     args = parser.parse_args()
 
     # Data transforms
@@ -824,15 +977,19 @@ def main():
         base_folder+'all_train_metas_v3_modelpred',
         base_folder+'all_train_basemaps_segmented_v3_modelpred',
         base_folder+'all_train_maps_segmented_v3_modelpred_UNITR',
-        transform_base, transform_gen
+        transform_base, transform_gen,
+        neighbor_window_s=args.neighbor_window_s
     )
     val_dataset = MapDataset(
         base_folder+'all_val_metas_v3_modelpred',
         base_folder+'all_val_basemaps_segmented_v3_modelpred', 
         base_folder+'all_val_maps_segmented_v3_modelpred_UNITR',
-        transform_base, transform_gen
+        transform_base, transform_gen,
+        neighbor_window_s=args.neighbor_window_s
     )
-
+    train_dataset.print_neighbor_stats("train")
+    val_dataset.print_neighbor_stats("val")
+    
     # Model and training setup
     model = GridClassifier()
     print("Trainable parameters:", count_trainable_parameters(model))
