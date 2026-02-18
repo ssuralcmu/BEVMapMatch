@@ -157,65 +157,43 @@ class MapDataset(Dataset):
         # except Exception as e:
         #     return torch.zeros(3, 100, 100), torch.zeros(3, 1000, 1000), torch.zeros(100), "", "", ""
 
-import torch
-import torch.nn as nn
-from transformers import AutoModel
-
 class DINOv3Backbone(nn.Module):
     """
-    HuggingFace DINOv3 backbone.
-    Returns spatial patch embeddings (B, D, H', W') like your DINOv2 wrapper.
+    DINOv3 via HuggingFace (py3.8 friendly).
+    Returns patch embeddings as a spatial feature map (B, D, H, W).
     """
-
-    def __init__(self, model_name="facebook/dinov3-vits16-pretrain-lvd1689m"):
+    def __init__(self, model_name="facebook/dinov3-vitl16-pretrain-lvd1689m"):
         super().__init__()
-
-        # HF officially supports AutoModel loading
-        self.model = AutoModel.from_pretrained(model_name)
-
-        # Freeze (typical usage — DINOv3 is designed to work without finetuning)
+        self.model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
         for p in self.model.parameters():
             p.requires_grad = False
         self.model.eval()
-
         self.embed_dim = self.model.config.hidden_size
-        self.patch_size = self.model.config.patch_size
-        self.num_register_tokens = self.model.config.num_register_tokens
 
     @torch.no_grad()
     def forward(self, x):
         """
-        x: (B,3,H,W) float tensor already normalized.
-        HF expects this tensor as `pixel_values`.
+        x: torch float tensor, shape (B,3,H,W), already normalized in your pipeline.
+        HF processor normally expects raw pixels, but we can bypass it:
+        - DINOv2 expects ImageNet normalization; you already do that.
+        - So we feed pixel_values=x directly.
         """
-
-        outputs = self.model(pixel_values=x)
-
-        # (B, seq_len, D)
-        tokens = outputs.last_hidden_state
-
-        B, seq_len, D = tokens.shape
-
-        # Remove CLS + register tokens (DINOv3-specific!)
-        patch_tokens = tokens[:, 1 + self.num_register_tokens :, :]
-
-        # Compute spatial grid size
-        H = x.shape[2] // self.patch_size
-        W = x.shape[3] // self.patch_size
-
-        # Reshape to spatial feature map
-        patch_tokens = patch_tokens.reshape(B, H, W, D)
-        patch_tokens = patch_tokens.permute(0, 3, 1, 2).contiguous()
-
-        return patch_tokens
-
+        out = self.model(pixel_values=x)
+        # last_hidden_state: (B, 1+N, D); drop CLS token
+        tokens = out.last_hidden_state[:, 1:]  # (B, N, D)
+        batch, num_tokens, dim = tokens.shape
+        side = int(num_tokens ** 0.5)
+        if side * side != num_tokens:
+            raise ValueError(
+                f"Expected square number of tokens, got {num_tokens}."
+            )
+        return tokens.transpose(1, 2).reshape(batch, dim, side, side)
 
 class GridClassifier(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.feature_extractor = DINOv3Backbone(model_name="facebook/dinov3-vits16-pretrain-lvd1689m")
-
+        self.feature_extractor = DINOv3Backbone(model_name="facebook/dinov3-vitl16-pretrain-lvd1689m")
         self.embed_dim = self.feature_extractor.embed_dim
 
         # # Freeze feature extractor
@@ -313,7 +291,7 @@ def soft_cross_entropy(logits, soft_targets):
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12010'
+    os.environ['MASTER_PORT'] = '12029'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
@@ -809,7 +787,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--train_fraction', type=float, default=1.0)
-    parser.add_argument('--num_epochs', type=int, default=60)
+    parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--seed', type=int, default=42)

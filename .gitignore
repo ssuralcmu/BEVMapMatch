@@ -29,6 +29,8 @@ make_video.zip
 
 /scripts_2025/v2_v3_models/*
 
+scripts_2026_paper/dinov3_ckpt/
+scripts_2026_paper/dinov3_venv/
 *.png
 
 scripts_2025/v4_v11_models_results/*
