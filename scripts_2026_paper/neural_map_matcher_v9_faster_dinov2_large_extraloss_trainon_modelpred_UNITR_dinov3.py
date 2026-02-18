@@ -31,6 +31,47 @@ def perturbation_to_pixel(perturbation, center_x, center_y, pixels_per_meter):
         center_y - perturbation[0] * pixels_per_meter,
     )
 
+import pickle
+import numpy as np
+
+class _IgnoreMMD3DUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        # Anything from mmdet3d becomes a harmless dummy object
+        if module.startswith("mmdet3d"):
+            return _Dummy
+        return super().find_class(module, name)
+
+class _Dummy:
+    def __init__(self, *args, **kwargs):
+        pass
+
+def load_numpy_pickle(npy_path):
+    """
+    Loads a .npy saved with allow_pickle=True that contains a dict/object,
+    while ignoring missing mmdet3d classes during unpickling.
+    """
+    with open(npy_path, "rb") as f:
+        # Detect .npy magic
+        magic = f.read(6)
+        f.seek(0)
+
+        if magic != b"\x93NUMPY":
+            # Not a .npy; treat as raw pickle
+            return _IgnoreMMD3DUnpickler(f).load()
+
+        # Parse .npy header to move file pointer to the start of data payload
+        version = np.lib.format.read_magic(f)
+        shape, fortran_order, dtype = np.lib.format._read_array_header(f, version)
+
+        # For object arrays, the payload is pickled after the header
+        if dtype.hasobject:
+            obj = _IgnoreMMD3DUnpickler(f).load()
+            return obj
+
+        # Otherwise it's a normal numeric npy
+        f.seek(0)
+        return np.load(f, allow_pickle=False)
+    
 class MapDataset(Dataset):
     def __init__(self, metas_folder, basemap_folder, stitched_folder, transform_base=None, transform_gen=None):
         self.basemap_folder = basemap_folder
@@ -116,8 +157,11 @@ class MapDataset(Dataset):
         if self.transform_base:
             basemap_img = self.transform_base(basemap_img)
 
-        metas = np.load(metas_path, allow_pickle=True).item()
-        
+        metas = load_numpy_pickle(metas_path)
+        if hasattr(metas, "item") and not isinstance(metas, dict):
+            metas = metas.item()
+
+                    
         # Convert coordinates to grid labels
         center_x, center_y = basemap_img.shape[1] // 2, basemap_img.shape[2] // 2
         # print("center_x: ", center_x)
@@ -179,8 +223,14 @@ class DINOv3Backbone(nn.Module):
         - So we feed pixel_values=x directly.
         """
         out = self.model(pixel_values=x)
-        # last_hidden_state: (B, 1+N, D); drop CLS token
-        tokens = out.last_hidden_state[:, 1:]  # (B, N, D)
+
+        # last_hidden_state: (B, 1+R+N, D) for DINO models with register tokens.
+        tokens = out.last_hidden_state[:, 1:]  # drop CLS -> (B, R+N, D)
+
+        num_register_tokens = int(getattr(self.model.config, "num_register_tokens", 0) or 0)
+        if num_register_tokens > 0:
+            tokens = tokens[:, num_register_tokens:]  # drop register tokens -> (B, N, D)
+
         batch, num_tokens, dim = tokens.shape
         side = int(num_tokens ** 0.5)
         if side * side != num_tokens:
@@ -377,7 +427,11 @@ def visualize_basemap_topk(basemap_path, metas_path, topk_idx, topk_probs, save_
     cell_width = width / GRID_DIM
     cell_height = height / GRID_DIM
 
-    metas = np.load(metas_path, allow_pickle=True).item()
+    metas = load_numpy_pickle(metas_path)
+    if hasattr(metas, "item") and not isinstance(metas, dict):
+        metas = metas.item()
+
+
     center_x, center_y = width // 2, height // 2
     meters_per_patch = 500.0
     pixels_per_meter = width / meters_per_patch
@@ -688,7 +742,17 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                 'losses': losses,
                 'subset_indices': subset_indices  # Save the indices
                 }
-                torch.save(checkpoint, 'latest_map_location_model_train_'+unique_name+'.pth')
+                import os
+                from pathlib import Path
+                print("CWD:", os.getcwd())
+
+                ckpt_dir = "checkpoints_grid"
+                ckpt_dir = Path(ckpt_dir)
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                save_path = ckpt_dir / f"latest_map_location_model_train_{unique_name}.pth"
+                print("Saving to:", save_path)
+
+                torch.save(checkpoint, save_path)
 
             # Validation
             if epoch % validate_every == 0 or epoch == start_epoch:
@@ -761,7 +825,17 @@ def train_model(rank, world_size, num_epochs, model, criterion, optimizer, sched
                     'losses': losses,
                     'subset_indices': subset_indices  # Save the indices
                     }
-                    torch.save(checkpoint, 'best_map_location_model_val_'+unique_name+'.pth')
+                    import os
+                    from pathlib import Path
+                    print("CWD:", os.getcwd())
+
+                    ckpt_dir = "checkpoints_grid"
+                    ckpt_dir = Path(ckpt_dir)
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    save_path = ckpt_dir / f"best_map_location_model_train_{unique_name}.pth"
+                    print("Saving to:", save_path)
+
+                    torch.save(checkpoint, save_path)
         
             if rank == 0:
                 print(
@@ -819,7 +893,7 @@ def main():
     ])
 
     # Datasets
-    base_folder = "/data1/"
+    base_folder = "/home/rtml/shounak_research/bevfusion/"
     train_dataset = MapDataset(
         base_folder+'all_train_metas_v3_modelpred',
         base_folder+'all_train_basemaps_segmented_v3_modelpred',
