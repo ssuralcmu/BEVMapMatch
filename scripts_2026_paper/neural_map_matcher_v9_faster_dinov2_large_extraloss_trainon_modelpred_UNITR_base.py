@@ -443,6 +443,9 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
                         num_workers=num_workers, pin_memory=True)
 
     correct_topk = 0
+    exact_match_count = 0
+    off_by_1_hv_count = 0
+    off_by_1_including_diag_count = 0
     total = 0
     total_iou = 0.0
 
@@ -457,6 +460,21 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
             labels = labels.to(device, non_blocking=True)  # (B,100)
 
             logits = model(stitched, basemap)  # (B,100)
+
+            pred_idx = logits.argmax(dim=1)
+            gt_idx = labels.argmax(dim=1)
+
+            pred_row = pred_idx // GRID_DIM
+            pred_col = pred_idx % GRID_DIM
+            gt_row = gt_idx // GRID_DIM
+            gt_col = gt_idx % GRID_DIM
+
+            row_diff = (pred_row - gt_row).abs()
+            col_diff = (pred_col - gt_col).abs()
+
+            exact_match_count += (row_diff.eq(0) & col_diff.eq(0)).sum().item()
+            off_by_1_hv_count += ((row_diff + col_diff) <= 1).sum().item()
+            off_by_1_including_diag_count += torch.maximum(row_diff, col_diff).le(1).sum().item()
 
             # Top-k hit accuracy (k matches the number of positives)
             _, topk = torch.topk(logits, POSITIVE_CELLS, dim=1)  # (B,k)
@@ -513,19 +531,39 @@ def run_inference(model, dataset, checkpoint_path, batch_size=64, num_workers=10
 
             avg_acc = correct_topk / max(1, total)
             avg_iou = total_iou / max(1, (pbar.n + 1))
-            pbar.set_postfix({"topk_acc": f"{avg_acc:.3f}", "iou%": f"{avg_iou:.2f}"})
+            avg_exact = exact_match_count / max(1, total)
+            avg_hv = off_by_1_hv_count / max(1, total)
+            avg_diag = off_by_1_including_diag_count / max(1, total)
+            pbar.set_postfix({
+                "topk_acc": f"{avg_acc:.3f}",
+                "iou%": f"{avg_iou:.2f}",
+                "exact": f"{avg_exact:.3f}",
+                "off1_hv": f"{avg_hv:.3f}",
+                "off1_diag": f"{avg_diag:.3f}",
+            })
 
     final_topk = correct_topk / max(1, total)
     final_iou = total_iou / len(loader)
+    final_exact = exact_match_count / max(1, total)
+    final_off_by_1_hv = off_by_1_hv_count / max(1, total)
+    final_off_by_1_diag = off_by_1_including_diag_count / max(1, total)
 
     with open(output_json, "w") as f:
         json.dump({
             "topk_acc": final_topk,
             "mean_iou_percent": final_iou,
+            "exact_match_fraction": final_exact,
+            "off_by_1_hv_fraction": final_off_by_1_hv,
+            "off_by_1_including_diag_fraction": final_off_by_1_diag,
             "outputs": outputs_list
         }, f)
 
     print(f"[Inference] Top-{POSITIVE_CELLS} Acc: {final_topk:.2%}, Mean IoU%: {final_iou:.2f}")
+    print(
+        f"[Inference] Exact match fraction: {final_exact:.2%}, "
+        f"Off-by-1 (H/V) fraction: {final_off_by_1_hv:.2%}, "
+        f"Off-by-1 incl. diagonal fraction: {final_off_by_1_diag:.2%}"
+    )
     print(f"[Inference] Saved outputs to: {output_json}")
     if viz:
         print(f"[Inference] Saved visualizations to: {str(viz_dir)}")
