@@ -280,10 +280,10 @@ def process_pair(pair):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data_dir", type=str, default="../../scripts_2026_fine/viz_dino_best_3x3crop_modelpred_unitr")
+    ap.add_argument("--data_dir", type=str, default="../../scripts_2026_fine/viz_dino_best_3x3crop_modelpred_unitr_2frames")
     ap.add_argument("--img0", type=str)
     ap.add_argument("--img1", type=str)
-    ap.add_argument("--out_dir", type=str, default="out_matchanything_all_evaluate_modelpred_rerun_unitr")
+    ap.add_argument("--out_dir", type=str, default="out_matchanything_all_evaluate_modelpred_rerun_unitr_2frames")
     ap.add_argument("--img0_suffix", type=str, default="_metas_top_pred_3x3.png")
     ap.add_argument("--img1_suffix", type=str, default="_metas_stitched.png")
     ap.add_argument("--annotation_suffix", type=str, default="_metas_annotation.json")
