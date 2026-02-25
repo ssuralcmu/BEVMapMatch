@@ -1,0 +1,11 @@
+percentile,metric,value
+P50,error/perturb_bound,0.007637842273294564
+P75,error/perturb_bound,0.212713123848839
+P90,error/perturb_bound,0.5380549460789298
+P95,error/perturb_bound,0.9086648493643678
+P99,error/perturb_bound,1.7483742193216774
+P50,error/map_side,0.0030551369093178254
+P75,error/map_side,0.08508524953953558
+P90,error/map_side,0.2152219784315719
+P95,error/map_side,0.3634659397457471
+P99,error/map_side,0.699349687728671

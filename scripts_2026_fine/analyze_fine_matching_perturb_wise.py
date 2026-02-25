@@ -244,14 +244,14 @@ def try_plot(rows: List[dict], out_path: Path, title: str) -> None:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--main_json", type=str, help="Path to main results JSON containing id + distance_m", default="/home/rtml/shounak_research/bevfusion/match_anything_inference/MatchAnything/out_matchanything_all_evaluate_modelpred/distance_errors.json")
+    ap.add_argument("--main_json", type=str, help="Path to main results JSON containing id + distance_m", default="../match_anything_inference/MatchAnything/out_matchanything_all_evaluate_modelpred/distance_errors.json")
     ap.add_argument(
         "--ann_dir",
         type=str,
         default="viz_dino_best_3x3crop",
         help="Folder containing *_metas_annotation.json files",
     )
-    ap.add_argument("--out_dir", type=str, default="out_perturb_analysis_modelpred", help="Output directory")
+    ap.add_argument("--out_dir", type=str, default="out_perturb_analysis_bevfusion", help="Output directory")
     ap.add_argument("--ignore_fallback", action="store_true", help="Ignore fallback_error in main JSON")
     ap.add_argument("--center_x", type=float, default=250.0)
     ap.add_argument("--center_y", type=float, default=250.0)

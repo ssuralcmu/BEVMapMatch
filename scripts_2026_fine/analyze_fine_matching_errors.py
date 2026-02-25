@@ -69,6 +69,35 @@ def compute_percentiles(errors: np.ndarray, percentiles=(50, 75, 90, 95, 99)) ->
     out = pd.DataFrame({"percentile": [f"P{p}" for p in percentiles], "error_m": vals})
     return out
 
+def compute_cdf_auc(errors: np.ndarray, T: float = 5.0) -> float:
+    """
+    Normalized area under the empirical CDF on [0, T].
+    Returns a score in [0, 1], where higher is better.
+
+    Interpretation:
+      - 1.0 means all errors are ~0 (CDF rises immediately)
+      - lower values mean errors are spread further right within [0, T]
+      - errors > T are clipped at T (so they contribute poorly to early CDF rise)
+    """
+    errors = np.asarray(errors, dtype=np.float64)
+    if errors.size == 0:
+        return float("nan")
+    if T <= 0:
+        raise ValueError("T must be > 0")
+
+    # Clip to [0, T] so catastrophic errors don't dominate this "good-case" metric
+    x = np.clip(errors, 0.0, T)
+    x.sort()
+    n = x.size
+
+    # Build a right-continuous empirical CDF over [0, T]
+    # x_points:   0, x1, x2, ..., xn, T
+    # cdf_vals:   0, 1/n, 2/n, ..., 1, 1
+    x_points = np.concatenate(([0.0], x, [T]))
+    cdf_vals = np.concatenate(([0.0], np.arange(1, n + 1) / n, [1.0]))
+
+    auc = np.trapz(cdf_vals, x_points)   # area under CDF from 0..T
+    return float(auc / T)                # normalize to [0, 1]
 
 def compute_threshold_metrics(errors: np.ndarray, thresholds=(1, 2, 5, 10)) -> pd.DataFrame:
     """
@@ -161,7 +190,7 @@ def plot_ccdf_tail(errors: np.ndarray, out_path: Path, xlim=(0.0, 500.0)):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--json_path", type=str, help="Path to JSON results file", default="/home/rtml/shounak_research/bevfusion/match_anything_inference/MatchAnything/out_matchanything_all_evaluate/distance_errors.json")
+    parser.add_argument("--json_path", type=str, help="Path to JSON results file", default="../match_anything_inference/MatchAnything/out_matchanything_all_evaluate/distance_errors.json")
     parser.add_argument("--out_dir", type=str, default="out", help="Output directory")
     parser.add_argument("--ignore_fallback", action="store_true", default=True, help="Ignore fallback_error even if present")
     parser.add_argument("--cdf_xmax", type=float, default=50.0, help="Max x for main CDF view")
@@ -196,6 +225,17 @@ def main():
     pretty_thr["success_rate"] = pretty_thr["success_rate"].map(lambda x: f"{100*x:.2f}%")
     pretty_thr["failure_rate"] = pretty_thr["failure_rate"].map(lambda x: f"{100*x:.2f}%")
     print(pretty_thr.to_string(index=False, justify="left"))
+    print()
+
+    # CDF-AUC scores (good-case concentration metrics)
+    cdf_auc_1 = compute_cdf_auc(errors, T=1.0)
+    cdf_auc_2 = compute_cdf_auc(errors, T=2.0)
+    cdf_auc_5 = compute_cdf_auc(errors, T=5.0)
+
+    print("CDF-AUC (normalized, higher is better):")
+    print(f"  AUC@1m: {cdf_auc_1:.4f}")
+    print(f"  AUC@2m: {cdf_auc_2:.4f}")
+    print(f"  AUC@5m: {cdf_auc_5:.4f}")
     print()
 
     # Save CSVs
