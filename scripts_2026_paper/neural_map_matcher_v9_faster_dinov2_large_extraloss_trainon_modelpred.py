@@ -7,6 +7,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
+from torch.utils.data import Subset
 from PIL import Image
 from tqdm import tqdm
 import numpy as np
@@ -263,6 +264,61 @@ def count_trainable_parameters(model):
 def count_total_parameters(model):
     return sum(p.numel() for p in model.parameters())
 
+def build_sample_token_condition_lookup(scene_json_path, sample_json_path):
+    with open(scene_json_path, "r") as f:
+        scenes = json.load(f)
+    with open(sample_json_path, "r") as f:
+        samples = json.load(f)
+
+    scene_flags = {}
+    for scene in scenes:
+        scene_flags[scene["token"]] = {
+            "night": str(scene.get("N", "0")) == "1",
+            "rain": str(scene.get("R", "0")) == "1",
+        }
+
+    lookup = {}
+    for sample in samples:
+        scene_token = sample.get("scene_token")
+        if scene_token in scene_flags:
+            lookup[sample["token"]] = scene_flags[scene_token]
+    return lookup
+
+
+def sample_matches_condition(flags, subset_name):
+    night = flags["night"]
+    rain = flags["rain"]
+    if subset_name == "night":
+        return night
+    if subset_name == "rain":
+        return rain
+    if subset_name == "night_rain":
+        return night and rain
+    if subset_name == "not_night_not_rain":
+        return (not night) and (not rain)
+    return True
+
+
+def build_condition_subset(dataset, subset_name, sample_flag_lookup):
+    if subset_name == "all":
+        return dataset, len(dataset)
+
+    keep_indices = []
+    for idx, entry in enumerate(dataset.file_triplets):
+        _, _, metas_file = entry
+        metas_path = os.path.join(dataset.metas_folder, metas_file)
+        metas = np.load(metas_path, allow_pickle=True).item()
+        sample_token = metas.get("sample_token") or metas.get("token")
+        if sample_token is None:
+            continue
+
+        flags = sample_flag_lookup.get(sample_token)
+        if flags is None:
+            continue
+        if sample_matches_condition(flags, subset_name):
+            keep_indices.append(idx)
+
+    return Subset(dataset, keep_indices), len(keep_indices)
 
 def strip_module_prefix(state_dict):
     """Handle checkpoints saved from DDP (keys start with 'module.')."""
@@ -796,7 +852,15 @@ def main():
                         help="Weight for distance-aware soft target loss.")
     parser.add_argument('--distance_sigma', type=float, default=0.8,
                         help="Gaussian sigma (grid cells) for distance-aware loss.")
-    
+    parser.add_argument('--weather_subset', type=str, default="all",
+                        choices=["all", "night", "rain", "night_rain", "not_night_not_rain"],
+                        help="Optional subset condition for inference split.")
+    parser.add_argument('--scene_json', type=str,
+                        default="/data1/data/nuscenes/v1.0-trainval/scene.json",
+                        help="nuScenes scene.json with N/R annotations.")
+    parser.add_argument('--sample_json', type=str,
+                        default="/data1/data/nuscenes/v1.0-trainval/sample.json",
+                        help="nuScenes sample.json used to map sample token -> scene token.")    
     args = parser.parse_args()
 
     # Data transforms
@@ -847,7 +911,13 @@ def main():
             raise ValueError("For --mode infer, you must provide a valid --checkpoint path.")
 
         infer_dataset = val_dataset if args.infer_split == "val" else train_dataset
-
+        if args.weather_subset != "all":
+            sample_flag_lookup = build_sample_token_condition_lookup(args.scene_json, args.sample_json)
+            infer_dataset, kept = build_condition_subset(infer_dataset, args.weather_subset, sample_flag_lookup)
+            print(f"Inference subset '{args.weather_subset}': kept {kept} samples")
+            if kept == 0:
+                raise ValueError("No samples matched the selected --weather_subset")
+            
         # Single-GPU inference (no DDP)
         run_inference(
             model=model,
