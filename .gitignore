@@ -51,3 +51,8 @@ match_anything_inference/matchanything_venv/
 match_anything_inference/MatchAnything/
 
 scripts_2026_paper/checkpoints_grid/
+
+scripts_2026_paper/ablations/checkpoints_grid/
+scripts_2026_paper/ablations/viz*
+
+scripts_2026_paper/ablations/*.pth
