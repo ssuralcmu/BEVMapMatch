@@ -27,13 +27,13 @@ import numpy as np
 
 # Global font sizes for all plots
 plt.rcParams.update({
-    "font.size": 14,          # base font
-    "axes.titlesize": 18,     # plot title
-    "axes.labelsize": 16,     # x/y labels
-    "xtick.labelsize": 16,    # x tick labels
-    "ytick.labelsize": 16,    # y tick labels
-    "legend.fontsize": 16,    # legend text
-    "legend.title_fontsize": 16,
+    "font.size": 22,          # base font
+    "axes.titlesize": 22,     # plot title
+    "axes.labelsize": 22,     # x/y labels
+    "xtick.labelsize": 22,    # x tick labels
+    "ytick.labelsize": 22,    # y tick labels
+    "legend.fontsize": 22,    # legend text
+    "legend.title_fontsize": 22,
 })
 
 def is_finite_number(x) -> bool:
