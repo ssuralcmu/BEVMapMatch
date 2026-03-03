@@ -52,17 +52,24 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate day/night val-scene GIFs with camera+lidar+map layout.")
     p.add_argument("--dataroot", type=Path, default=Path("/data1/data/nuscenes/"))
     p.add_argument("--version", type=str, default="v1.0-trainval")
-    p.add_argument("--distance-errors", type=Path, default=Path("/data1/match_anything_inference/MatchAnything/out_matchanything_all_evaluate/distance_errors.json"))
-    p.add_argument("--output-dir", type=Path, default=Path("/data1/match_anything_inference/MatchAnything/out_matchanything_all_evaluate/scene_gifs"))
-    p.add_argument("--day-scenes", type=int, default=10)
-    p.add_argument("--night-scenes", type=int, default=10)
+    p.add_argument("--distance-errors", type=Path, default=Path("/data1/match_anything_inference/MatchAnything/out_matchanything_all_evaluate_modelpred_rerun_unitr_4frames/distance_errors.json"))
+    p.add_argument("--output-dir", type=Path, default=Path("/data1/match_anything_inference/MatchAnything/out_matchanything_all_evaluate_modelpred_rerun_unitr_4frames/scene_gifs"))
+    p.add_argument("--day-scenes", type=int, default=15)
+    p.add_argument("--night-scenes", type=int, default=15)
     p.add_argument("--max-samples-per-scene", type=int, default=0)
-    p.add_argument("--fps", type=int, default=4)
+    p.add_argument("--fps", type=int, default=2)
     p.add_argument("--camera-tile-w", type=int, default=360)
     p.add_argument("--camera-tile-h", type=int, default=200)
     p.add_argument("--map-size", type=int, default=700)
-    p.add_argument("--map-patch-m", type=float, default=80.0)
+    p.add_argument("--map-patch-m", type=float, default=200.0)
     p.add_argument("--lidar-max-range", type=float, default=60.0)
+    p.add_argument(
+        "--map-pose-source",
+        type=str,
+        choices=["pred", "gt", "both"],
+        default="both",
+        help="Pose source for map panel center/marker: prediction offset from distance_errors (default), ground truth ego pose, or both markers.",
+    )
     return p.parse_args()
 
 
@@ -213,8 +220,7 @@ def render_lidar_panel(sample_row: dict, sample_data_by_sample_and_channel: Dict
 
     return panel
 
-
-def render_map_panel(sample_row: dict, scene_row: dict, sample_data_by_sample_and_channel: Dict[Tuple[str, str], str], sd_index: TableIndex, ego_index: TableIndex, log_index: TableIndex, dataroot: Path, map_size: int, patch_m: float, map_cache: Dict[str, object]) -> np.ndarray:
+def render_map_panel(sample_row: dict, scene_row: dict, sample_data_by_sample_and_channel: Dict[Tuple[str, str], str], sd_index: TableIndex, ego_index: TableIndex, log_index: TableIndex, dataroot: Path, map_size: int, patch_m: float, map_cache: Dict[str, object], map_pose_source: str = "pred", dist_err_row: Optional[dict] = None) -> np.ndarray:
     from nuscenes.map_expansion.map_api import NuScenesMap
 
     lidar_token = sample_data_by_sample_and_channel.get((sample_row["token"], "LIDAR_TOP"))
@@ -223,6 +229,17 @@ def render_map_panel(sample_row: dict, scene_row: dict, sample_data_by_sample_an
     sd = sd_index.get(lidar_token)
     ego = ego_index.get(sd["ego_pose_token"])
     x, y = float(ego["translation"][0]), float(ego["translation"][1])
+
+    dx_m, dy_m = 0.0, 0.0
+
+    if dist_err_row and dist_err_row.get("pred_center_xy") and dist_err_row.get("gt_center_xy"):
+        pred_x, pred_y = dist_err_row["pred_center_xy"]
+        gt_x, gt_y = dist_err_row["gt_center_xy"]
+        dx_m = (float(pred_x) - float(gt_x)) / 2.0
+        dy_m = -(float(pred_y) - float(gt_y)) / 2.0
+        if map_pose_source == "pred":
+            x += dx_m
+            y += dy_m
 
     log_row = log_index.get(scene_row["log_token"])
     map_name = log_row["location"]
@@ -238,7 +255,20 @@ def render_map_panel(sample_row: dict, scene_row: dict, sample_data_by_sample_an
         rgb[mask[i].astype(bool)] = MAP_LAYER_COLORS[layer]
 
     c = map_size // 2
-    rgb[max(0, c - 6): min(map_size, c + 7), max(0, c - 6): min(map_size, c + 7)] = np.array([255, 0, 0], dtype=np.uint8)
+
+    def draw_marker(px: int, py: int, color: np.ndarray) -> None:
+        rgb[max(0, py - 6): min(map_size, py + 7), max(0, px - 6): min(map_size, px + 7)] = color
+
+    if map_pose_source == "gt":
+        draw_marker(c, c, np.array([0, 0, 255], dtype=np.uint8))
+    elif map_pose_source == "pred":
+        draw_marker(c, c, np.array([255, 0, 0], dtype=np.uint8))
+    else:  # both
+        draw_marker(c, c, np.array([0, 0, 255], dtype=np.uint8))
+        px_per_m = map_size / patch_m
+        pred_px = int(round(c + dx_m * px_per_m))
+        pred_py = int(round(c - dy_m * px_per_m))
+        draw_marker(pred_px, pred_py, np.array([255, 0, 0], dtype=np.uint8))
     return rgb
 
 
@@ -401,8 +431,20 @@ def main() -> None:
 
             cam = build_camera_mosaic(s, sample_data_by_sample_and_channel, sd_index, args.dataroot, (args.camera_tile_h, args.camera_tile_w), args.version)
             lidar = render_lidar_panel(s, sample_data_by_sample_and_channel, sd_index, args.dataroot, (args.camera_tile_h * 2, args.camera_tile_w * 3), args.lidar_max_range, args.version)
-            map_img = render_map_panel(s, scene, sample_data_by_sample_and_channel, sd_index, ego_index, log_index, args.dataroot, args.map_size, args.map_patch_m, map_cache)
-
+            map_img = render_map_panel(
+                s,
+                scene,
+                sample_data_by_sample_and_channel,
+                sd_index,
+                ego_index,
+                log_index,
+                args.dataroot,
+                args.map_size,
+                args.map_patch_m,
+                map_cache,
+                map_pose_source=args.map_pose_source,
+                dist_err_row=err,
+            )
             msg = f"{scene_name} | {tok[:8]}"
             if err:
                 msg += f" | dist_m={err['distance_m']:.2f}"
