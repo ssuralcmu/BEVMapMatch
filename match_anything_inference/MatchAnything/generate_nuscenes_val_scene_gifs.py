@@ -21,11 +21,12 @@ CAMERA_ORDER = [
 ]
 
 MAP_LAYER_COLORS = {
-    "drivable_area": np.array([230, 230, 230], dtype=np.uint8),
-    "road_segment": np.array([170, 170, 170], dtype=np.uint8),
-    "lane": np.array([255, 220, 120], dtype=np.uint8),
-    "walkway": np.array([120, 200, 255], dtype=np.uint8),
-    "ped_crossing": np.array([255, 120, 120], dtype=np.uint8),
+    "drivable_area": np.array([166, 206, 227], dtype=np.uint8),
+    "ped_crossing": np.array([251, 154, 153], dtype=np.uint8),
+    "walkway": np.array([227, 26, 28], dtype=np.uint8),
+    "stop_line": np.array([253, 191, 111], dtype=np.uint8),
+    "carpark_area": np.array([255, 127, 0], dtype=np.uint8),
+    "lane_divider": np.array([106, 61, 154], dtype=np.uint8),
 }
 
 
@@ -259,16 +260,38 @@ def render_map_panel(sample_row: dict, scene_row: dict, sample_data_by_sample_an
     def draw_marker(px: int, py: int, color: np.ndarray) -> None:
         rgb[max(0, py - 6): min(map_size, py + 7), max(0, px - 6): min(map_size, px + 7)] = color
 
+    gt_color = np.array([0, 0, 255], dtype=np.uint8)
+    pred_color = np.array([255, 0, 0], dtype=np.uint8)
+    overlap_color = np.array([0, 255, 0], dtype=np.uint8)
+
     if map_pose_source == "gt":
-        draw_marker(c, c, np.array([0, 0, 255], dtype=np.uint8))
+        draw_marker(c, c, gt_color)
     elif map_pose_source == "pred":
-        draw_marker(c, c, np.array([255, 0, 0], dtype=np.uint8))
+        draw_marker(c, c, pred_color)
     else:  # both
-        draw_marker(c, c, np.array([0, 0, 255], dtype=np.uint8))
+        draw_marker(c, c, gt_color)
         px_per_m = map_size / patch_m
         pred_px = int(round(c + dx_m * px_per_m))
         pred_py = int(round(c - dy_m * px_per_m))
-        draw_marker(pred_px, pred_py, np.array([255, 0, 0], dtype=np.uint8))
+        if pred_px == c and pred_py == c:
+            draw_marker(c, c, overlap_color)
+        else:
+            draw_marker(pred_px, pred_py, pred_color)
+
+        legend_items = [
+            ("GT", gt_color),
+            ("Pred", pred_color),
+            ("Overlap", overlap_color),
+        ]
+        legend = Image.fromarray(rgb)
+        dr = ImageDraw.Draw(legend)
+        x0, y0 = 12, 12
+        for i, (label, color) in enumerate(legend_items):
+            yy = y0 + i * 20
+            dr.rectangle((x0, yy, x0 + 12, yy + 12), fill=tuple(int(v) for v in color))
+            dr.text((x0 + 18, yy - 1), label, fill=(255, 255, 255))
+        rgb = np.asarray(legend)
+
     return rgb
 
 
