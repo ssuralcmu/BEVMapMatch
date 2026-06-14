@@ -22,6 +22,49 @@ import math
 from pathlib import Path
 import matplotlib.pyplot as plt
 
+# Optional stubs for legacy checkpoints that pickle mmdet3d classes.
+try:
+    import mmdet3d  # type: ignore
+except Exception:
+    import types
+    import sys
+
+    class _Box3DMode:
+        def __new__(cls, *args, **kwargs):
+            return object.__new__(cls)
+
+    class _LiDARInstance3DBoxes:
+        def __init__(self, *args, **kwargs):
+            self.data = args[0] if args else None
+        def __new__(cls, *args, **kwargs):
+            return object.__new__(cls)
+
+    _mmdet3d = types.ModuleType("mmdet3d")
+    _core = types.ModuleType("mmdet3d.core")
+    _bbox = types.ModuleType("mmdet3d.core.bbox")
+    _structures = types.ModuleType("mmdet3d.core.bbox.structures")
+    _box3d_mode = types.ModuleType("mmdet3d.core.bbox.structures.box_3d_mode")
+    _lidar_box3d = types.ModuleType("mmdet3d.core.bbox.structures.lidar_box3d")
+
+    _box3d_mode.Box3DMode = _Box3DMode
+    _lidar_box3d.LiDARInstance3DBoxes = _LiDARInstance3DBoxes
+    _structures.box_3d_mode = _box3d_mode
+    _structures.lidar_box3d = _lidar_box3d
+    _bbox.structures = _structures
+    _core.bbox = _bbox
+    _mmdet3d.core = _core
+
+    for mod in [
+        ("mmdet3d", _mmdet3d),
+        ("mmdet3d.core", _core),
+        ("mmdet3d.core.bbox", _bbox),
+        ("mmdet3d.core.bbox.structures", _structures),
+        ("mmdet3d.core.bbox.structures.box_3d_mode", _box3d_mode),
+        ("mmdet3d.core.bbox.structures.lidar_box3d", _lidar_box3d),
+    ]:
+        sys.modules.setdefault(mod[0], mod[1])
+
+
 GRID_DIM = 10
 TARGET_BLOCK = 1
 POSITIVE_CELLS = TARGET_BLOCK * TARGET_BLOCK
@@ -1107,6 +1150,7 @@ def main():
     parser.add_argument('--viz', action='store_true', help="Save 10x10 Pred vs GT grid visualizations")
     parser.add_argument('--validate_every', type=int, default=1)
     parser.add_argument('--amp', action='store_true', default=True, help="Enable mixed precision training/inference")
+    parser.add_argument('--base_folder', type=str, default="/data1/", help="Root directory containing all_train_*/all_val_* map/meta folders.")
     parser.add_argument('--viz_dir', type=str, default="viz_grids")
     parser.add_argument('--infer_split', type=str, default="val", choices=["train", "val"])
     parser.add_argument('--infer_out', type=str, default="inference_outputs.json")
@@ -1143,7 +1187,26 @@ def main():
     ])
 
     # Datasets
-    base_folder = "/data1/"
+
+    base_folder = args.base_folder
+    if not base_folder.endswith("/"):
+        base_folder = base_folder + "/"
+
+    # Basic input availability check
+    required_folders = [
+        'all_train_metas_v3_modelpred',
+        'all_val_metas_v3_modelpred',
+        'all_train_basemaps_segmented_v3_modelpred',
+        'all_val_basemaps_segmented_v3_modelpred',
+        'all_train_maps_segmented_gt_v3_modelpred/map/',
+        'all_val_maps_segmented_gt_v3_modelpred/map/',
+        'all_train_maps_segmented_v3_modelpred_UNITR',
+        'all_val_maps_segmented_v3_modelpred_UNITR',
+    ]
+    for folder in required_folders:
+        if not os.path.exists(os.path.join(base_folder, folder)):
+            print(f'[warn] Missing expected folder: {os.path.join(base_folder, folder)}')
+
     train_dataset = MapDataset(
         base_folder+'all_train_metas_v3_modelpred',
         base_folder+'all_train_basemaps_segmented_v3_modelpred',

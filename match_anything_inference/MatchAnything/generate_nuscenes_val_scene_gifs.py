@@ -226,7 +226,7 @@ def render_map_panel(sample_row: dict, scene_row: dict, sample_data_by_sample_an
 
     lidar_token = sample_data_by_sample_and_channel.get((sample_row["token"], "LIDAR_TOP"))
     if lidar_token is None:
-        return np.zeros((map_size, map_size, 3), dtype=np.uint8)
+        return np.full((map_size, map_size, 3), 255, dtype=np.uint8)
     sd = sd_index.get(lidar_token)
     ego = ego_index.get(sd["ego_pose_token"])
     x, y = float(ego["translation"][0]), float(ego["translation"][1])
@@ -251,7 +251,7 @@ def render_map_panel(sample_row: dict, scene_row: dict, sample_data_by_sample_an
     layers = list(MAP_LAYER_COLORS.keys())
     mask = nusc_map.get_map_mask((x, y, patch_m, patch_m), 0, layers, (map_size, map_size))
 
-    rgb = np.zeros((map_size, map_size, 3), dtype=np.uint8)
+    rgb = np.full((map_size, map_size, 3), 255, dtype=np.uint8)
     for i, layer in enumerate(layers):
         rgb[mask[i].astype(bool)] = MAP_LAYER_COLORS[layer]
 
@@ -289,7 +289,7 @@ def render_map_panel(sample_row: dict, scene_row: dict, sample_data_by_sample_an
         for i, (label, color) in enumerate(legend_items):
             yy = y0 + i * 20
             dr.rectangle((x0, yy, x0 + 12, yy + 12), fill=tuple(int(v) for v in color))
-            dr.text((x0 + 18, yy - 1), label, fill=(255, 255, 255))
+            dr.text((x0 + 30, yy - 1), label, fill=(0, 0, 0))
         rgb = np.asarray(legend)
 
     return rgb
