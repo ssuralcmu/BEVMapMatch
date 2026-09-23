@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bevmapmatch"
 version = "0.1.0"
-description = "Clean reproduction code for BEVMapMatch coarse-to-fine re-localization"
+description = "Multimodal BEV neural map matching for robust vehicle re-localization"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

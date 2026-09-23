@@ -1,4 +1,3 @@
-"""BEVMapMatch clean reproduction package."""
+"""BEVMapMatch."""
 
 __version__ = "0.1.0"
-

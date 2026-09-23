@@ -6,7 +6,7 @@ authors:
   - family-names: Sural
     given-names: Shounak
   - family-names: Rajkumar
-    given-names: Ragunathan Raj
+    given-names: Ragunathan
 version: 0.1.0
 date-released: 2026-09-22
 repository-code: "https://github.com/ssuralcmu/BEVMapMatch"
@@ -17,7 +17,6 @@ preferred-citation:
     - family-names: Sural
       given-names: Shounak
     - family-names: Rajkumar
-      given-names: Ragunathan Raj
+      given-names: Ragunathan
   year: 2026
   journal: "arXiv preprint arXiv:2603.25963"
-
