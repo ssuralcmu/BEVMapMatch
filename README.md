@@ -1,5 +1,14 @@
 # BEVMapMatch
 
+<p align="center">
+  <a href="https://arxiv.org/abs/2603.25963"><img src="https://img.shields.io/badge/arXiv-2603.25963-b31b1b.svg" alt="arXiv"></a>
+  <img src="https://img.shields.io/badge/IROS-2026-0057b8.svg" alt="IROS 2026">
+</p>
+
+<p align="center">
+  <img src="docs/assets/bevmapmatch_demo.gif" alt="BEVMapMatch demo" width="720">
+</p>
+
 Multimodal bird's-eye-view neural map matching for global vehicle
 re-localization without a GNSS prior.
 
