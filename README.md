@@ -34,6 +34,20 @@ Install a CUDA-enabled PyTorch build from
 [pytorch.org](https://pytorch.org/get-started/locally/) when the default pip
 installation does not match the system CUDA version.
 
+## Download checkpoints
+
+Download all released checkpoints from
+[BEVMapMatch Models](https://drive.google.com/drive/folders/1p133pqV2i6RiZHF30qR6LCDdoSuAWILv),
+or run:
+
+```bash
+python -m pip install gdown
+gdown --folder https://drive.google.com/drive/folders/1p133pqV2i6RiZHF30qR6LCDdoSuAWILv -O models
+```
+
+The files must be placed directly under `models/`. Checksums and file purposes
+are listed in `models/MANIFEST.md`.
+
 ## Download nuScenes
 
 1. Create an account at the [nuScenes download page](https://www.nuscenes.org/nuscenes#download).
@@ -62,10 +76,11 @@ NuScenes(version='v1.0-trainval', dataroot='data/nuscenes', verbose=True)
 PY
 ```
 
-## Generate UniTR BEV segmentations
+## Generate CAF BEV segmentations with UniTR
 
-The segmentation stage uses the context-aware UniTR+LSS implementation in
-`third_party/UniTR`. Install it in a Python 3.8 environment with CUDA 11.3:
+The released UniTR+LSS checkpoint is the CAF segmentation checkpoint used by
+this pipeline. The implementation is included in `third_party/UniTR`. Install
+it in a Python 3.8 environment with CUDA 11.3:
 
 ```bash
 conda create -n unitr python=3.8 -y
@@ -77,8 +92,7 @@ pip install spconv-cu113==2.1.25
 pip install -e third_party/UniTR
 ```
 
-Place the UniTR+LSS map-segmentation checkpoint at
-`models/unitr_map_lss.pth`, then expose the nuScenes dataset to UniTR and
+Place `unitr_map_lss.pth` under `models/`, expose nuScenes to UniTR, and
 generate its metadata:
 
 ```bash
@@ -97,26 +111,12 @@ python -m pcdet.datasets.nuscenes.nuscenes_dataset \
 cd tools
 ```
 
-Fine-tune the context-aware fusion gate from the UniTR+LSS checkpoint:
+Export CAF segmentations directly with the released UniTR checkpoint:
 
 ```bash
-bash scripts/dist_train.sh 8 \
-  --cfg_file cfgs/nuscenes_models/unitr_map+lss.yaml \
-  --pretrained_model ../../../models/unitr_map_lss.pth \
-  --finetune_context_only \
-  --sync_bn \
-  --eval_map \
-  --logger_iter_interval 1000
-```
-
-Export the validation segmentations with the selected context-aware
-checkpoint:
-
-```bash
-CONTEXT_CHECKPOINT=../output/cfgs/nuscenes_models/unitr_map+lss/default/ckpt/checkpoint_epoch_20.pth
 python test.py \
   --cfg_file cfgs/nuscenes_models/unitr_map+lss.yaml \
-  --ckpt "$CONTEXT_CHECKPOINT" \
+  --ckpt ../../../models/unitr_map_lss.pth \
   --eval_map \
   --save_map_outputs \
   --map_score_thresh 0.5
@@ -217,11 +217,14 @@ metrics to `checkpoints/coarse.history.json`.
 
 ## Run coarse inference
 
+Select the checkpoint that matches the number of temporal frames:
+
 ```bash
 python scripts/infer_coarse.py \
   --config configs/paper.yaml \
-  --checkpoint checkpoints/coarse.pt \
-  --output outputs/coarse_predictions.json
+  --checkpoint models/coarse_4frame_caf.pth \
+  --neighbor-frames 3 \
+  --output outputs/coarse_4frame_predictions.json
 ```
 
 The output contains each sample's predicted cell, ground-truth cell, class
@@ -231,7 +234,7 @@ probabilities, and source paths.
 
 ```bash
 python scripts/prepare_fine_pairs.py \
-  outputs/coarse_predictions.json \
+  outputs/coarse_4frame_predictions.json \
   --output outputs/fine_pairs
 ```
 
@@ -276,11 +279,11 @@ python -m compileall -q src scripts
 
 ```bash
 make install
+make download-models
 make prepare-train NUSCENES_ROOT=data/nuscenes
 make prepare-val NUSCENES_ROOT=data/nuscenes
 python scripts/verify_data.py
-make train
-make infer
+make infer CHECKPOINT=models/coarse_4frame_caf.pth NEIGHBOR_FRAMES=3
 make fine-pairs
 python scripts/run_fine_matchanything.py \
   outputs/fine_pairs/manifest.json \
