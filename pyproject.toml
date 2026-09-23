@@ -17,6 +17,8 @@ dependencies = [
   "transformers>=4.38",
   "tqdm>=4.66",
   "opencv-python>=4.8",
+  "nuscenes-devkit>=1.1.11",
+  "pyquaternion>=0.9.9",
 ]
 
 [project.optional-dependencies]
@@ -28,3 +30,5 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 
+[tool.ruff]
+line-length = 110

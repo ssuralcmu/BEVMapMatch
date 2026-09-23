@@ -34,7 +34,7 @@ def _timestamp_seconds(value: float) -> float:
 def perturbation_to_pixel(
     perturbation: np.ndarray | list[float], center_x: float, center_y: float, pixels_per_meter: float
 ) -> tuple[float, float]:
-    """Match the coordinate convention used by the internal experiments."""
+    """Convert the map perturbation vector to image coordinates."""
     return (
         center_x - float(perturbation[1]) * pixels_per_meter,
         center_y - float(perturbation[0]) * pixels_per_meter,
@@ -44,7 +44,7 @@ def perturbation_to_pixel(
 class MapDataset(Dataset):
     """Pairs generated BEV segmentations, 500 m basemaps and metadata.
 
-    Files are joined by the stem before the internal suffix. Temporal neighbors
+    Files are joined by the stem before the dataset suffix. Temporal neighbors
     are selected only inside the same sequence, avoiding accidental scene leaks.
     """
 
@@ -166,4 +166,3 @@ class MapDataset(Dataset):
             "segmentation_path": str(sample.segmentation),
             "basemap_path": str(sample.basemap),
         }
-

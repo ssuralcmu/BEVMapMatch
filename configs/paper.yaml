@@ -5,13 +5,13 @@ data:
   image_size: 224
   grid_dim: 10
   train:
-    metadata: all_train_metas_v3_modelpred
-    basemaps: all_train_basemaps_segmented_v3_modelpred
-    segmentations: all_train_maps_segmented_v3_modelpred_UNITR
+    metadata: train/metadata
+    basemaps: train/basemaps
+    segmentations: train/segmentations
   val:
-    metadata: all_val_metas_v3_modelpred
-    basemaps: all_val_basemaps_segmented_v3_modelpred
-    segmentations: all_val_maps_segmented_v3_modelpred_UNITR
+    metadata: val/metadata
+    basemaps: val/basemaps
+    segmentations: val/segmentations
 model:
   backbone: facebook/dinov2-large
   attention_heads: 8
@@ -29,4 +29,3 @@ fine:
   pixels_per_meter: 2.0
   matcher: matchanything_eloftr
   ransac_reprojection_threshold: 8.0
-

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import yaml
 from tqdm import tqdm
 
 from bevmapmatch.fine import map_query_center
@@ -65,4 +64,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

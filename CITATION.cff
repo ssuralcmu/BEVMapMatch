@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the BEVMapMatch paper."
+title: "BEVMapMatch"
+type: software
+authors:
+  - family-names: Sural
+    given-names: Shounak
+  - family-names: Rajkumar
+    given-names: Ragunathan Raj
+version: 0.1.0
+date-released: 2026-09-22
+repository-code: "https://github.com/ssuralcmu/BEVMapMatch"
+preferred-citation:
+  type: article
+  title: "BEVMapMatch: Multimodal BEV Neural Map Matching for Robust Re-Localization of Autonomous Vehicles"
+  authors:
+    - family-names: Sural
+      given-names: Shounak
+    - family-names: Rajkumar
+      given-names: Ragunathan Raj
+  year: 2026
+  journal: "arXiv preprint arXiv:2603.25963"
+
