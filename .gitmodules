@@ -1,0 +1,3 @@
+[submodule "third_party/UniTR"]
+	path = third_party/UniTR
+	url = https://github.com/ssuralcmu/UniTR.git

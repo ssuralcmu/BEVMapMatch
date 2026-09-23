@@ -21,7 +21,7 @@ BEVMapMatch uses a three-stage pipeline:
 ## Installation
 
 ```bash
-git clone https://github.com/ssuralcmu/BEVMapMatch.git
+git clone --recurse-submodules https://github.com/ssuralcmu/BEVMapMatch.git
 cd BEVMapMatch
 
 python3 -m venv .venv
@@ -62,6 +62,70 @@ NuScenes(version='v1.0-trainval', dataroot='data/nuscenes', verbose=True)
 PY
 ```
 
+## Generate UniTR BEV segmentations
+
+The segmentation stage uses the context-aware UniTR+LSS implementation in
+`third_party/UniTR`. Install it in a Python 3.8 environment with CUDA 11.3:
+
+```bash
+conda create -n unitr python=3.8 -y
+conda activate unitr
+pip install torch==1.10.1+cu113 torchvision==0.11.2+cu113 \
+  --extra-index-url https://download.pytorch.org/whl/cu113
+pip install -r third_party/UniTR/requirements.txt
+pip install spconv-cu113==2.1.25
+pip install -e third_party/UniTR
+```
+
+Place the UniTR+LSS map-segmentation checkpoint at
+`models/unitr_map_lss.pth`, then expose the nuScenes dataset to UniTR and
+generate its metadata:
+
+```bash
+mkdir -p third_party/UniTR/data/nuscenes
+ln -s "$(pwd)/data/nuscenes" \
+  third_party/UniTR/data/nuscenes/v1.0-trainval
+
+cd third_party/UniTR
+python -m pcdet.datasets.nuscenes.nuscenes_dataset \
+  --func create_nuscenes_infos \
+  --cfg_file tools/cfgs/dataset_configs/nuscenes_dataset.yaml \
+  --version v1.0-trainval \
+  --with_cam \
+  --with_cam_gt
+
+cd tools
+```
+
+Fine-tune the context-aware fusion gate from the UniTR+LSS checkpoint:
+
+```bash
+bash scripts/dist_train.sh 8 \
+  --cfg_file cfgs/nuscenes_models/unitr_map+lss.yaml \
+  --pretrained_model ../../../models/unitr_map_lss.pth \
+  --finetune_context_only \
+  --sync_bn \
+  --eval_map \
+  --logger_iter_interval 1000
+```
+
+Export the validation segmentations with the selected context-aware
+checkpoint:
+
+```bash
+CONTEXT_CHECKPOINT=../output/cfgs/nuscenes_models/unitr_map+lss/default/ckpt/checkpoint_epoch_20.pth
+python test.py \
+  --cfg_file cfgs/nuscenes_models/unitr_map+lss.yaml \
+  --ckpt "$CONTEXT_CHECKPOINT" \
+  --eval_map \
+  --save_map_outputs \
+  --map_score_thresh 0.5
+cd ../../..
+```
+
+UniTR writes predictions below
+`third_party/UniTR/output/cfgs/nuscenes_models/unitr_map+lss/default/eval/`.
+
 ## Prepare map-matching data
 
 Create the training and validation inputs:
@@ -92,6 +156,16 @@ python scripts/prepare_nuscenes.py \
   --split val \
   --output data/processed \
   --max-samples 64
+```
+
+Replace the generated local-map images with the corresponding sensor-derived
+UniTR predictions:
+
+```bash
+python scripts/import_unitr_segmentations.py \
+  --unitr-output third_party/UniTR/output/cfgs/nuscenes_models/unitr_map+lss/default/eval/epoch_no_number/val/default/map_outputs \
+  --processed-root data/processed \
+  --split val
 ```
 
 Prepared samples use this layout:
