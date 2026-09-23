@@ -36,17 +36,35 @@ installation does not match the system CUDA version.
 
 ## Download checkpoints
 
-Download all released checkpoints from
-[BEVMapMatch Models](https://drive.google.com/drive/folders/1p133pqV2i6RiZHF30qR6LCDdoSuAWILv),
-or run:
+To run inference without training, download everything from
+[BEVMapMatch Models](https://drive.google.com/drive/folders/1p133pqV2i6RiZHF30qR6LCDdoSuAWILv)
+into the repository's `models/` directory. The supplied checkpoints cover CAF
+segmentation with UniTR, 1/2/4/8-frame coarse retrieval, and MatchAnything
+fine alignment.
+
+The complete folder can be downloaded from the command line with:
 
 ```bash
 python -m pip install gdown
 gdown --folder https://drive.google.com/drive/folders/1p133pqV2i6RiZHF30qR6LCDdoSuAWILv -O models
 ```
 
-The files must be placed directly under `models/`. Checksums and file purposes
-are listed in `models/MANIFEST.md`.
+After downloading, the checkpoint paths must be:
+
+```text
+models/
+├── unitr_map_lss.pth
+├── coarse_1frame_caf.pth
+├── coarse_2frame_caf.pth
+├── coarse_4frame_caf.pth
+├── coarse_8frame_caf.pth
+├── matchanything_eloftr.ckpt
+└── bevfusion_segmentation_baseline.pth
+```
+
+Proceed directly to the inference sections below. Training is only required
+when creating new checkpoints. Checksums and file purposes are listed in
+`models/MANIFEST.md`.
 
 ## Download nuScenes
 
