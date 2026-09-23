@@ -1,0 +1,32 @@
+seed: 42
+data:
+  root: data/processed
+  map_size_m: 500.0
+  image_size: 224
+  grid_dim: 10
+  train:
+    metadata: all_train_metas_v3_modelpred
+    basemaps: all_train_basemaps_segmented_v3_modelpred
+    segmentations: all_train_maps_segmented_v3_modelpred_UNITR
+  val:
+    metadata: all_val_metas_v3_modelpred
+    basemaps: all_val_basemaps_segmented_v3_modelpred
+    segmentations: all_val_maps_segmented_v3_modelpred_UNITR
+model:
+  backbone: facebook/dinov2-large
+  attention_heads: 8
+  neighbor_frames: 3
+  neighbor_window_s: 2.0
+train:
+  epochs: 100
+  batch_size: 8
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  distance_loss_weight: 0.1
+  distance_sigma: 0.8
+  workers: 8
+fine:
+  pixels_per_meter: 2.0
+  matcher: matchanything_eloftr
+  ransac_reprojection_threshold: 8.0
+
