@@ -8,3 +8,4 @@ data/
 outputs/
 *.pth
 *.pt
+.DS_Store
