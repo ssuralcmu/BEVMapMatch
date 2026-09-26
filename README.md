@@ -18,13 +18,6 @@
 Multimodal bird's-eye-view neural map matching for global vehicle
 re-localization without a GNSS prior.
 
-BEVMapMatch uses a three-stage pipeline:
-
-1. Generate a 100 m x 100 m semantic BEV map around the vehicle.
-2. Retrieve the most likely 50 m x 50 m cell from a 500 m x 500 m map.
-3. Refine the location within the predicted 3 x 3 neighborhood using
-   EfficientLoFTR correspondences and homography estimation.
-
 ## Requirements
 
 - Linux
@@ -53,9 +46,7 @@ installation does not match the system CUDA version.
 
 To run inference without training, download everything from
 [BEVMapMatch Models](https://drive.google.com/drive/folders/1p133pqV2i6RiZHF30qR6LCDdoSuAWILv)
-into the repository's `models/` directory. The supplied checkpoints cover CAF
-segmentation with UniTR, 1/2/4/8-frame coarse retrieval, and MatchAnything
-fine alignment.
+into the repository's `models/` directory. 
 
 The complete folder can be downloaded from the command line with:
 
@@ -78,8 +69,7 @@ models/
 ```
 
 Proceed directly to the inference sections below. Training is only required
-when creating new checkpoints. Checksums and file purposes are listed in
-`models/MANIFEST.md`.
+when creating new checkpoints. 
 
 ## Download nuScenes
 
@@ -110,10 +100,6 @@ PY
 ```
 
 ## Generate CAF BEV segmentations with UniTR
-
-The released UniTR+LSS checkpoint is the CAF segmentation checkpoint used by
-this pipeline. The implementation is included in `third_party/UniTR`. Install
-it in a Python 3.8 environment with CUDA 11.3:
 
 ```bash
 conda create -n unitr python=3.8 -y
@@ -156,7 +142,7 @@ python test.py \
 cd ../../..
 ```
 
-UniTR writes predictions below
+CAF writes predictions below
 `third_party/UniTR/output/cfgs/nuscenes_models/unitr_map+lss/default/eval/`.
 
 ## Prepare map-matching data
@@ -271,12 +257,9 @@ python scripts/prepare_fine_pairs.py \
   --output outputs/fine_pairs
 ```
 
-This creates a normalized 300 x 300 map crop, a query BEV image, and an
-annotation for each validation sample.
-
 ## Run fine alignment
 
-Clone and install MatchAnything:
+Install MatchAnything:
 
 ```bash
 git clone https://github.com/zju3dv/MatchAnything.git third_party/MatchAnything
